@@ -2,12 +2,15 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "workbar",
   "description": "workbar: a progress and session-health mod for Claude Code.",
-  "owner": { "name": "OskarasM", "url": "https://github.com/OskarasM" },
+  "owner": {
+    "name": "OskarasM",
+    "url": "https://github.com/OskarasM"
+  },
   "plugins": [
     {
       "name": "workbar",
       "source": "./",
-      "description": "A live progress bar with honest time estimates, subagent tracking, chat-size and prompt-cache health with one-press Compact or Hand off, files-changed list, and desktop/phone alerts. Uses almost no tokens."
+      "description": "Shows how far along Claude is and when it will really be done, what it is waiting on, what it changed, and when a chat is getting too big or going cold. Small, close to zero tokens, terminal and desktop app."
     }
   ]
 }

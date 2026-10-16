@@ -386,3 +386,95 @@ test('with the band off only the status line reports', { options: { band: 'off' 
   const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
   expect(await ui.find({ text: /engine band/ })).toBeDefined()
 })
+
+// ---- 0.3.0: desktop app, cheaper topic check, app-native alerts, permission waits ----
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`on the ${surface} the band draws a plan, agents and actions without being refused`, async ($, on) => {
+    engine(on)
+    bigChat(on)
+    on('agent.spawn', () => ({ model: 'sonnet', agentId: 'ag-s' }) as never)
+    await $.turn.start({ text: 'build', turnId: `s-${surface}` })
+    await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['Read', 'Write', 'Test'], estimate_minutes: 6, done: 1 } as never)
+    await $.agent.spawn({ prompt: 'dig', description: 'Look into the API', subagentType: 'Explore' } as never)
+    const working = await $.ui.mount({ plugin: 'workbar', surface, component: 'AbovePrompt', props: BAND } as never)
+    expect(await working.find({ text: /▶ Write/ })).toBeDefined()
+    expect(await working.find({ text: /Look into the API/ })).toBeDefined()
+    await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 'a-s', reason: 'answer', agentId: 'ag-s' } as never)
+    await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: `s-${surface}`, reason: 'answer' } as never)
+    const idleBand = await $.ui.mount({ plugin: 'workbar', surface, component: 'AbovePrompt', props: idle() } as never)
+    expect(await idleBand.find({ key: 'compact' })).toBeDefined()
+    expect(await idleBand.find({ text: /320k/ })).toBeDefined()
+  })
+}
+
+test('the topic check never calls Haiku for a message about the same work', { options: { topicCheck: true } }, async ($, on) => {
+  engine(on)
+  bigChat(on, 80_000)
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  on('clock.after', () => ({ value: undefined }) as never)
+  let calls = 0
+  on('model.complete', () => {
+    calls++
+    return { value: { isAnswered: true, text: 'NEW', usage: {} } } as never
+  })
+  await $.prompt.submit({ text: 'build the login form validation for the signup page with clear error messages' } as never)
+  await $.turn.start({ text: 'x', turnId: 'tc1' })
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'tc1', reason: 'answer' } as never)
+  const same = await $.prompt.submit({ text: 'now show the signup form validation errors under each field instead of a banner' } as never)
+  expect(same.drop).toBeUndefined()
+  expect(calls).toBe(0)
+  await $.turn.start({ text: 'x', turnId: 'tc2' })
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'tc2', reason: 'answer' } as never)
+  const other = await $.prompt.submit({ text: 'write a python script that renames holiday photos in downloads by date taken' } as never)
+  expect(calls).toBe(1)
+  expect(other.drop).toBeDefined()
+})
+
+test('alerts use Claude Code’s own notification, and on Windows a bell-only one becomes a toast', async ($, on) => {
+  engine(on)
+  on('env.get', (_$, e) => ({ value: (e as { name: string }).name === 'OS' ? 'Windows_NT' : undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: (e as { cwd: string }).cwd }) as never)
+  on('settings.read', () => ({ value: {} }) as never)
+  on('clock.every', () => ({ value: undefined }) as never)
+  on('ui.log', () => ({ value: undefined }) as never)
+  on('tool.register', () => ({ value: undefined }) as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  bigChat(on, 1_000)
+  let channel = 'terminal_bell'
+  let toasts = 0
+  on('ui.notify', () => ({ value: { isSent: true, channel } }) as never)
+  on('process.run', () => {
+    toasts++
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  await $.session.start({ cwd: 'C:/proj', surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'long one', turnId: 'n1' })
+  now += 3 * 60_000
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'n1', reason: 'answer' } as never)
+  channel = 'desktop'
+  now += 60_000
+  await $.turn.start({ text: 'another', turnId: 'n2' })
+  now += 3 * 60_000
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'n2', reason: 'answer' } as never)
+  // Windows Terminal rang the bell only, so that one became a Windows toast; the app showed the second itself
+  expect(toasts).toBe(1)
+})
+
+test('time on a permission prompt is kept out of the estimate', async ($, on) => {
+  engine(on)
+  const status: (string | undefined)[] = []
+  on('ui.status', (_$, e) => {
+    status.push((e as { text?: string }).text)
+    return { value: undefined } as never
+  })
+  on('tool.call', () => ({ result: 'ok' }) as never)
+  on('classic.Notification', () => ({}) as never)
+  await $.turn.start({ text: 'build', turnId: 'pw' })
+  await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['A', 'B', 'C'], estimate_minutes: 10 } as never)
+  await $.classic.Notification({ notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' } as never)
+  now += 10 * 60_000 // you come back ten minutes later and approve
+  await $.tool.call({ tool: 'Bash', command: 'npm test' } as never)
+  await $.tool.call({ tool: 'mcp__workbar__progress', done: 0 } as never)
+  expect(status[status.length - 1]).toMatch(/^▶ 0\/3 · ~5m left$/)
+})

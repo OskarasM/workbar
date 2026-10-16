@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 (2026-10-16)
+
+Smaller, cheaper, and ready for the desktop app.
+
+- Settings trimmed from 11 to 7. Phone alerts (ntfy), the cache-lifetime setting and the alert-time setting are gone; amber and red are one "warn at" size (red at twice it). The cache lifetime is detected.
+- The new-task check runs a free local word check first and calls Haiku only for a message that shares almost no words with your recent ones, with a ~150-token note at low effort. Still off by default.
+- Alerts use Claude Code's own notifications first; the Windows toast only stands in where Claude Code can only ring the bell. No double pop-ups in the desktop app.
+- Time on permission prompts no longer counts towards estimates, like questions and plan approval already did.
+- The band is tested on the desktop surface as well as the terminal.
+- README: why workbar exists and what it holds to.
+
 ## 0.2.0 (2026-10-16)
 
 First public release.

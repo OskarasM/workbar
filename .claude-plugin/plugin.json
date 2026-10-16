@@ -1,12 +1,23 @@
 {
   "name": "workbar",
-  "version": "0.2.0",
-  "description": "A live progress bar with honest time estimates, subagent tracking, chat-size and prompt-cache health with one-press Compact or Hand off, files-changed list, and desktop/phone alerts. Uses almost no tokens.",
-  "author": { "name": "OskarasM", "url": "https://github.com/OskarasM" },
+  "version": "0.3.0",
+  "description": "Shows how far along Claude is and when it will really be done, what it is waiting on, what it changed, and when a chat is getting too big or going cold. Small, close to zero tokens, terminal and desktop app.",
+  "author": {
+    "name": "OskarasM",
+    "url": "https://github.com/OskarasM"
+  },
   "homepage": "https://github.com/OskarasM/workbar",
   "repository": "https://github.com/OskarasM/workbar",
   "license": "MIT",
-  "keywords": ["progress", "status", "context", "cache", "handoff", "notifications", "subagents"],
+  "keywords": [
+    "progress",
+    "status",
+    "context",
+    "cache",
+    "handoff",
+    "notifications",
+    "subagents"
+  ],
   "types": "./types/index.d.ts",
   "userConfig": {
     "band": {
@@ -14,7 +25,11 @@
       "title": "Band above the prompt",
       "description": "auto: show the band only when there is something to see or do (a plan, agents, files changed, a warning); the chat size then lives in the status line. always: also show the chat-size gauge between tasks. off: status line only.",
       "default": "auto",
-      "options": ["auto", "always", "off"]
+      "options": [
+        "auto",
+        "always",
+        "off"
+      ]
     },
     "progressTool": {
       "type": "boolean",
@@ -31,45 +46,20 @@
     "topicCheck": {
       "type": "boolean",
       "title": "Spot a new task in a long chat",
-      "description": "In chats over 60k tokens, ask Haiku whether a new message is a different task and suggest a fresh chat. Costs one small model call (a few hundred tokens) per such message.",
+      "description": "In chats over 60k tokens, notice when a new message looks like a different task and suggest a fresh chat. A free local word check runs first; only a message that shares almost no words with your recent ones is sent to Haiku as a ~150-token note (never the chat). Off: no model calls at all.",
       "default": false
     },
-    "amberTokens": {
+    "warnTokens": {
       "type": "number",
-      "title": "Chat size: amber at",
-      "description": "Tokens at which the band suggests finishing the current task in this chat.",
+      "title": "Chat size: warn at",
+      "description": "Tokens at which the band turns amber and suggests finishing this task here. At twice this it turns red and recommends Compact or Hand off.",
       "default": 150000
-    },
-    "redTokens": {
-      "type": "number",
-      "title": "Chat size: red at",
-      "description": "Tokens at which the band recommends Compact or Hand off before sending more.",
-      "default": 300000
-    },
-    "cacheTtl": {
-      "type": "string",
-      "title": "Prompt cache lifetime",
-      "description": "auto: 1 hour on a Claude subscription, 5 minutes otherwise (or your promptCacheTtl setting).",
-      "default": "auto",
-      "options": ["auto", "5m", "1h"]
     },
     "notify": {
       "type": "boolean",
       "title": "Desktop alerts",
-      "description": "Pop-ups when Claude needs your approval, has waited 15 s on a question, or finishes a long run. Windows uses a native toast; elsewhere your terminal's notifications.",
+      "description": "A pop-up when Claude needs your approval, has waited 15 s on a question, or finishes a run of 2 minutes or more. Uses Claude Code's own notifications (the desktop app, terminals that have them); on Windows Terminal a Windows toast.",
       "default": true
-    },
-    "notifyAfterSeconds": {
-      "type": "number",
-      "title": "Alert when a run takes longer than (seconds)",
-      "description": "A run that finishes after at least this long sends a 'Finished' alert.",
-      "default": 120
-    },
-    "pushUrl": {
-      "type": "string",
-      "title": "Phone alerts (ntfy URL)",
-      "description": "Optional. An ntfy topic URL such as https://ntfy.sh/your-secret-topic: the same alerts reach your phone. Only the alert text is sent. Empty: off.",
-      "default": ""
     },
     "activityDir": {
       "type": "string",

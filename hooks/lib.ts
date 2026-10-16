@@ -70,6 +70,22 @@ export function calibrationSample(p: Plan, activeMin: number): number | null {
   return clamp(projected / p.firstEstimateMin, 0.03, 20)
 }
 
+// ---- topic check, the free part ----
+const STOP = new Set(
+  'that this with from have what when then them they your about into also just like make sure want need please could would should there their here will more some only than very each which while still after before because does done being been were these those other really thing things okay yeah'.split(' '),
+)
+const words = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9_.\-/]{4,}/g) ?? []).filter(w => !STOP.has(w)))
+
+// True when a message shares (almost) no words with the earlier requests: the only case worth a model call.
+export function looksUnrelated(text: string, earlier: string[]): boolean {
+  const mine = words(text)
+  if (mine.size < 4) return false // too short to judge; follow-ups are usually short
+  const seen = words(earlier.join(' '))
+  let shared = 0
+  for (const w of mine) if (seen.has(w)) shared++
+  return shared / mine.size < 0.15
+}
+
 // ---- usage pace: when the current rate would use up a limit window ----
 export type PaceBase = { kind: string; resetsAt: string; pct: number; at: number }
 

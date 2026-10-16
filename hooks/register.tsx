@@ -16,6 +16,7 @@ import {
   fmtMin,
   hhmm,
   limitLabel,
+  looksUnrelated,
   minutesLeft,
   nextPaceBases,
   paceFullAt,
@@ -29,37 +30,30 @@ type Opts = {
   progressTool: boolean
   holdMessages: boolean
   topicCheck: boolean
-  amberTokens: number
+  amberTokens: number // "warn at": amber from here, red at twice this
   redTokens: number
-  cacheTtl: 'auto' | '5m' | '1h'
   notify: boolean
-  notifyAfterSeconds: number
-  pushUrl: string
   activityDir: string
 }
 function readOpts(raw: unknown): Opts {
   const o = (raw ?? {}) as Record<string, unknown>
-  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d)
-  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
-  const amber = num(o.amberTokens, 150_000)
+  const warn = typeof o.warnTokens === 'number' && Number.isFinite(o.warnTokens) && o.warnTokens >= 10_000 ? o.warnTokens : 150_000
   return {
     band: o.band === 'always' || o.band === 'off' ? o.band : 'auto',
     progressTool: o.progressTool !== false,
     holdMessages: o.holdMessages !== false,
     topicCheck: o.topicCheck === true,
-    amberTokens: amber,
-    redTokens: Math.max(amber + 1, num(o.redTokens, 300_000)),
-    cacheTtl: o.cacheTtl === '5m' || o.cacheTtl === '1h' ? o.cacheTtl : 'auto',
+    amberTokens: warn,
+    redTokens: warn * 2,
     notify: o.notify !== false,
-    notifyAfterSeconds: num(o.notifyAfterSeconds, 120),
-    pushUrl: /^https?:\/\//i.test(str(o.pushUrl)) ? str(o.pushUrl) : '',
-    activityDir: str(o.activityDir),
+    activityDir: typeof o.activityDir === 'string' ? o.activityDir.trim() : '',
   }
 }
 let opts = readOpts(undefined)
 
 const COLD_HOLD_TOKENS = 100_000 // with the cache expired, hold messages above this size
 const TOPIC_CHECK_TOKENS = 60_000
+const NOTIFY_AFTER_S = 120 // alert when a run takes longer than this
 const ASK_ALERT_MS = 15_000 // alert when a question from Claude waits this long
 const STUCK_AFTER = 3 // failed tool calls in a row
 
@@ -119,9 +113,9 @@ async function markActivity($: EngineInterface, state: 'busy' | 'idle') {
   }
 }
 
-// ---- alerts: desktop (Windows toast, or the terminal's own channel) and optional phone push ----
-// Windows Terminal has no notification channel Claude Code can use ($.ui.notify only rings the bell
-// there), so on Windows pop-ups go through Windows itself. Title and text travel in the environment.
+// ---- alerts: Claude Code's own notification first (the desktop app, terminals with a channel) ----
+// Windows Terminal has none ($.ui.notify only rings the bell there), so on Windows a bell-only or
+// failed notification becomes a Windows toast. Title and text travel in the environment, not the script.
 const TOAST_PS = `$ErrorActionPreference = 'Stop'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
 $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
@@ -133,23 +127,23 @@ $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powersh
 let lastAlertAt = 0
 
 async function alert($: EngineInterface, text: string) {
-  if (!opts.notify && !opts.pushUrl) return
+  if (!opts.notify) return
   const at = await $.clock.now()
   if (at - lastAlertAt < 5000) return // one alert for one moment
   lastAlertAt = at
-  const jobs: Promise<unknown>[] = []
-  if (opts.notify) {
-    jobs.push(
-      isWindows
-        ? $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', TOAST_PS], {
-            env: { WB_TITLE: 'Claude Code', WB_TEXT: text },
-            timeoutMs: 15000,
-          })
-        : $.ui.notify(text, { title: 'Claude Code' }),
-    )
+  try {
+    const r = await $.ui.notify(text, { title: 'Claude Code' }).catch(() => ({ isSent: false as const, reason: 'error' }))
+    const shown = r.isSent && r.channel !== 'terminal_bell'
+    if (shown || !isWindows || (!r.isSent && r.reason === 'disabled')) return
+    void $.process
+      .run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', TOAST_PS], {
+        env: { WB_TITLE: 'Claude Code', WB_TEXT: text },
+        timeoutMs: 15000,
+      })
+      .catch(() => undefined)
+  } catch {
+    // a missed alert is not worth failing anything for
   }
-  if (opts.pushUrl) jobs.push($.http.fetch(opts.pushUrl, { method: 'POST', body: text, headers: { Title: 'Claude Code', Tags: 'robot' } }))
-  await Promise.allSettled(jobs) // a missed alert is not worth failing anything for
 }
 
 // ---- files touched since your last message ----
@@ -237,8 +231,9 @@ async function calibration($: EngineInterface): Promise<number> {
   return calibrationFrom((await $.store.get('calib')) as number[] | undefined)
 }
 
+// 1 hour on a Claude subscription (it reports usage windows), 5 minutes otherwise, unless promptCacheTtl says.
 const cacheTtlMs = (h: Health) => {
-  const ttl = opts.cacheTtl !== 'auto' ? opts.cacheTtl : settingsTtl || (h.limits.length > 0 ? '1h' : '5m')
+  const ttl = settingsTtl || (h.limits.length > 0 ? '1h' : '5m')
   return (ttl === '1h' ? 60 : 5) * 60_000
 }
 
@@ -327,13 +322,13 @@ async function refreshTokens($: EngineInterface) {
   }
 }
 
+// Is a new message a different task? A free local check first: a message that shares words with the
+// recent requests is the same work, and most are. Only one that shares almost none goes to Haiku, as a
+// note of about 150 tokens (never the chat), at low effort with a tiny reply.
 async function isNewTopic($: EngineInterface, h: Health, text: string): Promise<boolean> {
-  const prompt = `A user is working in one long AI coding chat.
-Chat started with: """${clip(h.firstPrompt, 600)}"""
-Recent requests: ${h.recentPrompts.map(p => `"""${clip(p, 250)}"""`).join(' ; ') || '(none)'}
-New request: """${clip(text, 600)}"""
-Is the new request a continuation of the same piece of work (same feature, bug, files or follow-up), or a different task that would be better started in a fresh chat? Answer with exactly one word: SAME or NEW.`
-  const r = await $.model.complete({ model: 'haiku', prompt, maxTokens: 5, timeoutMs: 4000 })
+  if (!looksUnrelated(text, [h.firstPrompt, ...h.recentPrompts])) return false
+  const prompt = `Requests so far in one coding chat:\n- ${clip(h.firstPrompt, 200)}\n${h.recentPrompts.map(p => `- ${clip(p, 150)}`).join('\n')}\nNew request: ${clip(text, 300)}\nSame piece of work, or a new task better started fresh? Reply SAME or NEW.`
+  const r = await $.model.complete({ model: 'haiku', prompt, maxTokens: 16, effort: 'low', timeoutMs: 4000 })
   return r.isAnswered === true && /\bNEW\b/i.test(r.text)
 }
 
@@ -395,6 +390,23 @@ async function handOff($: EngineInterface, nextTask?: string) {
   } finally {
     await update($, health, x => ({ ...x, isHandingOff: false }))
   }
+}
+
+// Time spent waiting on you (a question, plan approval, a permission prompt) is not Claude's working
+// time: it is kept out of the estimates and out of calibration.
+let permissionWaiting = false
+async function beginWait($: EngineInterface, at: number) {
+  await update($, live, l => (l.waitingSince ? l : { ...l, waitingSince: at }))
+}
+async function endWait($: EngineInterface) {
+  permissionWaiting = false
+  const at = await $.clock.now()
+  await update($, live, l => {
+    if (!l.waitingSince) return l
+    const waited = Math.max(0, at - l.waitingSince)
+    const plan = l.plan && l.plan.startedAt <= l.waitingSince ? { ...l.plan, waitMs: l.plan.waitMs + waited } : l.plan
+    return { ...l, waitingSince: 0, plan }
+  })
 }
 
 // Claude's own todo list (TodoWrite) as a plan, for when it keeps one instead of reporting progress.
@@ -767,13 +779,13 @@ export const register: Register = (on, options) => {
       if (agentId === undefined) await update($, live, l => ({ ...l, tools: l.tools + 1, lastAction: action }))
       else await update($, agents, list => list.map(a => (a.id === agentId ? { ...a, tools: a.tools + 1, lastAction: action } : a)))
     }
+    // A tool call starting means any permission prompt before it has been answered.
+    if (permissionWaiting) await endWait($)
     const ops = await filesBefore($, tool, any).catch(() => [] as FileOp[])
     const question = agentId === undefined ? QUESTION_TOOLS[tool] : undefined
-    let askedAt = 0
     if (question) {
-      askedAt = await $.clock.now()
       await update($, asking, () => question)
-      await update($, live, l => ({ ...l, waitingSince: askedAt }))
+      await beginWait($, await $.clock.now())
       await syncStatus($)
       $.clock.after(ASK_ALERT_MS, async () => {
         if ((await read($, asking)) === question) await alert($, question)
@@ -783,14 +795,8 @@ export const register: Register = (on, options) => {
     try {
       ran = await next(e)
     } finally {
+      if (question || permissionWaiting) await endWait($)
       if (question) {
-        // Time spent waiting on you is not Claude's working time: keep it out of the estimates.
-        const waited = Math.max(0, (await $.clock.now()) - askedAt)
-        await update($, live, l => ({
-          ...l,
-          waitingSince: 0,
-          plan: l.plan && l.plan.startedAt <= askedAt ? { ...l.plan, waitMs: l.plan.waitMs + waited } : l.plan,
-        }))
         await update($, asking, () => null)
         await syncStatus($)
       }
@@ -842,6 +848,10 @@ export const register: Register = (on, options) => {
   on('classic.Notification', async ($, e, next) => {
     const r = await next(e)
     if (e.notification_type === 'permission_prompt' || e.notification_type === 'elicitation_dialog') {
+      if ((await read($, live)).isWorking) {
+        permissionWaiting = true
+        await beginWait($, await $.clock.now())
+      }
       void alert($, e.message || 'Claude needs your approval')
     }
     return r
@@ -882,6 +892,7 @@ export const register: Register = (on, options) => {
       await syncStatus($)
       return next(e)
     }
+    await endWait($)
     const l = await read($, live)
     const seconds = Math.round((at - l.startedAt) / 1000)
     const plan = l.plan
@@ -911,7 +922,7 @@ export const register: Register = (on, options) => {
     }
     lastAdvised = lvNow
     await syncStatus($)
-    if (seconds >= opts.notifyAfterSeconds && !e.isAborted) void alert($, `Finished in ${fmtDur(seconds * 1000)}`)
+    if (seconds >= NOTIFY_AFTER_S && !e.isAborted) await alert($, `Finished in ${fmtDur(seconds * 1000)}`)
     return next(e)
   })
 
