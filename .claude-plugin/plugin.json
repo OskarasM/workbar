@@ -1,0 +1,81 @@
+{
+  "name": "workbar",
+  "version": "0.2.0",
+  "description": "A live progress bar with honest time estimates, subagent tracking, chat-size and prompt-cache health with one-press Compact or Hand off, files-changed list, and desktop/phone alerts. Uses almost no tokens.",
+  "author": { "name": "OskarasM", "url": "https://github.com/OskarasM" },
+  "homepage": "https://github.com/OskarasM/workbar",
+  "repository": "https://github.com/OskarasM/workbar",
+  "license": "MIT",
+  "keywords": ["progress", "status", "context", "cache", "handoff", "notifications", "subagents"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "band": {
+      "type": "string",
+      "title": "Band above the prompt",
+      "description": "auto: show the band only when there is something to see or do (a plan, agents, files changed, a warning); the chat size then lives in the status line. always: also show the chat-size gauge between tasks. off: status line only.",
+      "default": "auto",
+      "options": ["auto", "always", "off"]
+    },
+    "progressTool": {
+      "type": "boolean",
+      "title": "Ask Claude for a progress plan",
+      "description": "On: Claude reports steps and an estimate through a tiny tool (about 150 cached tokens per request, a few dozen per task). Off: no tokens at all; the bar then follows Claude's own todo list when it keeps one.",
+      "default": true
+    },
+    "holdMessages": {
+      "type": "boolean",
+      "title": "Hold a message into an oversized or cold chat",
+      "description": "Before a message goes into a very large chat, or a large one whose prompt cache has expired, hold it once and offer Compact or Hand off. Pressing Enter again sends it anyway.",
+      "default": true
+    },
+    "topicCheck": {
+      "type": "boolean",
+      "title": "Spot a new task in a long chat",
+      "description": "In chats over 60k tokens, ask Haiku whether a new message is a different task and suggest a fresh chat. Costs one small model call (a few hundred tokens) per such message.",
+      "default": false
+    },
+    "amberTokens": {
+      "type": "number",
+      "title": "Chat size: amber at",
+      "description": "Tokens at which the band suggests finishing the current task in this chat.",
+      "default": 150000
+    },
+    "redTokens": {
+      "type": "number",
+      "title": "Chat size: red at",
+      "description": "Tokens at which the band recommends Compact or Hand off before sending more.",
+      "default": 300000
+    },
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt cache lifetime",
+      "description": "auto: 1 hour on a Claude subscription, 5 minutes otherwise (or your promptCacheTtl setting).",
+      "default": "auto",
+      "options": ["auto", "5m", "1h"]
+    },
+    "notify": {
+      "type": "boolean",
+      "title": "Desktop alerts",
+      "description": "Pop-ups when Claude needs your approval, has waited 15 s on a question, or finishes a long run. Windows uses a native toast; elsewhere your terminal's notifications.",
+      "default": true
+    },
+    "notifyAfterSeconds": {
+      "type": "number",
+      "title": "Alert when a run takes longer than (seconds)",
+      "description": "A run that finishes after at least this long sends a 'Finished' alert.",
+      "default": 120
+    },
+    "pushUrl": {
+      "type": "string",
+      "title": "Phone alerts (ntfy URL)",
+      "description": "Optional. An ntfy topic URL such as https://ntfy.sh/your-secret-topic: the same alerts reach your phone. Only the alert text is sent. Empty: off.",
+      "default": ""
+    },
+    "activityDir": {
+      "type": "string",
+      "title": "Activity marker folder",
+      "description": "Optional. A folder where each session writes a <session>.txt file reading 'busy <ms>' or 'idle <ms>', for your own scripts (for example: sleep the machine once Claude is done). Empty: off.",
+      "default": ""
+    }
+  }
+}
