@@ -8,6 +8,7 @@ Smaller, cheaper, and ready for the desktop app.
 - The new-task check runs a free local word check first and calls Haiku only for a message that shares almost no words with your recent ones, with a ~150-token note at low effort. Still off by default.
 - Alerts use Claude Code's own notifications first; the Windows toast only stands in where Claude Code can only ring the bell. No double pop-ups in the desktop app.
 - Time on permission prompts no longer counts towards estimates, like questions and plan approval already did.
+- Fix: **Log in** now appears when you hit a usage limit. It used to wait for a usage window to read 100%, which a turn ending on a grace allowance never showed; it now follows Claude Code's own "Usage limit reached" notice (and a usage-limit API error), and clears once you log in or the next turn starts.
 - The band is tested on the desktop surface as well as the terminal.
 - README: why workbar exists and what it holds to.
 

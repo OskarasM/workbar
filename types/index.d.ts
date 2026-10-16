@@ -32,6 +32,7 @@ export type Health = {
   limits: { kind: string; pct: number; resetsAt: string }[]
   paceBases: { kind: string; resetsAt: string; pct: number; at: number }[]
   costUsd: number
+  limitNoticeAt: number // when Claude Code said the usage limit was reached; 0 when it has not
 }
 
 export type Hold = { text: string; reason: string; isNewTask: boolean } | null

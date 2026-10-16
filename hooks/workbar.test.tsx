@@ -478,3 +478,27 @@ test('time on a permission prompt is kept out of the estimate', async ($, on) =>
   await $.tool.call({ tool: 'mcp__workbar__progress', done: 0 } as never)
   expect(status[status.length - 1]).toMatch(/^▶ 0\/3 · ~5m left$/)
 })
+
+test('Claude Code’s usage-limit notice brings up Log in, and /login clears it', async ($, on) => {
+  engine(on)
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('store.set', () => ({ value: undefined }) as never)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return (<Text>engine band</Text>) as never
+  })
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  // the turn ends normally on a grace allowance, with the window still under 100%
+  on('session.usage', () =>
+    ({ value: { context: { tokens: 90_000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 97, resetsAt: '2030-01-01T00:00:00Z' }] } }) as never,
+  )
+  await $.turn.start({ text: 'work', turnId: 'lim' })
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'lim', reason: 'answer' } as never)
+  await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: 'Usage limit reached · continuing automatically at 8pm · esc to cancel' }] } } as never)
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
+  expect(await ui.find({ text: /★ Log in/ })).toBeDefined()
+  await $.prompt.submit({ text: '/login', command: { name: 'login', args: '' } } as never)
+  expect(await ui.find({ key: 'login' })).toBeUndefined()
+  expect(await ui.find({ text: /engine band/ })).toBeDefined()
+})

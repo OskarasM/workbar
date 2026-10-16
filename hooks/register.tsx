@@ -81,6 +81,7 @@ const EMPTY_HEALTH: Health = {
   limits: [],
   paceBases: [],
   costUsd: 0,
+  limitNoticeAt: 0,
 }
 
 const live = atom({ plugin: 'workbar', key: 'live' } as const, EMPTY_LIVE)
@@ -247,8 +248,16 @@ function level(h: Health, now: number): Level {
   return 'ok'
 }
 
-// A usage window used up and not yet reset: Claude Code says so itself; the band only adds a way to switch account.
-const isLimitHit = (h: Health, now: number) => h.limits.some(x => x.pct >= 100 && (!x.resetsAt || !(Date.parse(x.resetsAt) <= now)))
+// A usage limit reached: Claude Code says so itself; the band only adds a way to switch account. Its notice
+// is the reliable sign (a turn can end normally on a grace allowance with the window under 100%).
+const LIMIT_TEXT = /usage limit reached|limit reached|reached your (?:usage |weekly |session )?limit|out of (?:extra )?usage/i
+const isLimitHit = (h: Health, now: number) =>
+  (h.limitNoticeAt ?? 0) > 0 || h.limits.some(x => x.pct >= 100 && (!x.resetsAt || !(Date.parse(x.resetsAt) <= now)))
+async function markLimit($: EngineInterface, hit: boolean) {
+  const at = hit ? await $.clock.now() : 0
+  await update($, health, h => ({ ...h, limitNoticeAt: at, limits: hit ? h.limits : h.limits.filter(x => x.pct < 100) }))
+  await syncStatus($)
+}
 
 // Unfinished plan or a same-task message: Compact. Finished plan or a new-task message: Hand off.
 function recommendsHandoff(l: Live, held: Hold): boolean {
@@ -667,7 +676,11 @@ export const register: Register = (on, options) => {
 
   // Hold a message before it goes into a chat that is too big, cold, or about something else.
   on('prompt.submit', async ($, e, next) => {
-    if (e.command || e.isMeta) return next(e)
+    if (e.command) {
+      if (e.command.name === 'login' && (await read($, health)).limitNoticeAt) await markLimit($, false)
+      return next(e)
+    }
+    if (e.isMeta) return next(e)
     if (e.turnId) {
       // Typed while a run is going: ask Claude to fold it into the visible plan.
       const l = await read($, live)
@@ -727,9 +740,33 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => next(e))
 
+  // Claude Code's own notice that the usage limit is reached (the transcript row, never read by the model).
+  on('session.append', async ($, e, next) => {
+    const r = await next(e)
+    if (e.message.type === 'system' && e.agentId === undefined) {
+      const content: unknown = e.message.content
+      const text =
+        typeof content === 'string'
+          ? content
+          : (Array.isArray(content) ? content : [])
+              .map(b => (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))
+              .join(' ')
+      if (LIMIT_TEXT.test(text)) await markLimit($, true)
+    }
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // The same when an API error ends the turn over a usage limit or billing.
+  on('classic.StopFailure', async ($, e, next) => {
+    const r = await next(e)
+    if (e.error === 'billing_error' || (e.error === 'rate_limit' && LIMIT_TEXT.test(e.error_details ?? ''))) await markLimit($, true)
+    return r
+  }).catch(($, e, next) => next(e))
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const at = await $.clock.now()
+      if ((await read($, health)).limitNoticeAt) await markLimit($, false) // logged in, or the limit reset
       errStreak = { tool: '', count: 0 }
       await update($, stuck, () => null)
       await update($, live, l => ({ ...l, isWorking: true, startedAt: at, tools: 0, lastAction: '', plan: null, waitingSince: 0 }))
@@ -1118,7 +1155,7 @@ export const register: Register = (on, options) => {
         10,
         choices([
           choice('login', 'Log in', 'switch account', 'l', true, async () => {
-            await update($, health, h => ({ ...h, limits: h.limits.filter(x => x.pct < 100) }))
+            await markLimit($, false)
             await $.command.run({ command: 'login' }).catch(() => undefined)
           }),
         ]),

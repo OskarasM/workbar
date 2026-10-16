@@ -113,7 +113,7 @@ The band shares the bottom of the terminal with the prompt and Claude Code's own
 - The band is shared: only one mod draws above the prompt at a time. In `auto` mode workbar steps aside when there is nothing to show, so other mods' bands get their turn.
 - Files changed by scripts (`python`, `sed -i`, build tools) are not listed; only Claude's own Write/Edit tools and plain `rm`/`del` commands are.
 - The progress bar needs Claude to report a plan (or keep a todo list). Quick answers get none, on purpose.
-- In organizations that manage Claude Code, a user-installed mod's `Notification` hook does not run, so approval alerts are skipped there.
+- In organizations that manage Claude Code, a user-installed mod's `Notification` and `StopFailure` hooks do not run, so approval alerts are skipped there (the usage-limit Log in button still follows Claude Code's notice).
 - The band is tested on the terminal and desktop surfaces in Claude Code's test kit, and used daily on Windows 11 with Windows Terminal. The `/tasks` pane in the desktop app, and macOS and Linux, are less tried.
 
 ## Compared with
