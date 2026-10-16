@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentRun, ChromeIssue, FileTouch, Health, Hold, Live, Plan, Stuck } from '../types'
+import type { AgentRun, ChromeIssue, FileTouch, Health, Hold, Live, Notice, Plan, Stuck } from '../types'
 import {
   absPath,
   activeMinutes,
@@ -9,11 +9,13 @@ import {
   calibrationFrom,
   calibrationSample,
   clip,
+  compactSkipText,
   deleteTargets,
   fitRows,
   fmtDur,
   fmtK,
   fmtMin,
+  freshTokens,
   hhmm,
   limitLabel,
   looksUnrelated,
@@ -21,6 +23,7 @@ import {
   nextPaceBases,
   paceFullAt,
   plural,
+  sharesStep,
   wrappedRows,
 } from './lib'
 
@@ -62,13 +65,32 @@ const PROGRESS_TOOL = 'mcp__workbar__progress'
 const PROGRESS_DESCRIPTION =
   "Live progress bar for the user. For a task needing more than ~3 tool calls, call it first with `steps` (3-10 short labels) and `estimate_minutes`: your own wall-clock time to finish, usually minutes, not the hours a person would take. After each step, put `done` (steps finished) in the same response as your next tool call, never alone. If the plan changes, resend the full `steps` and a new estimate. Skip it for quick answers."
 const MIDRUN_NOTE = 'If this changes the work, resend mcp__workbar__progress with the full updated `steps` and estimate alongside your next tool call.'
+// Claude often skips the tool on work of 4-10 tool calls. One reminder per message, only once a task has
+// proved longer than a quick answer, so short replies cost nothing.
+const QUICK_TOOLS = 3 // up to this many tool calls with no plan reads as a quick task
+const NUDGE_NOTE =
+  'This task is taking several steps: send mcp__workbar__progress (`steps`, `estimate_minutes`) alongside your next tool call so the user can see progress.'
+const NUDGE_CARRIED_NOTE =
+  "The progress bar still shows your plan from the user's last message: alongside your next tool call send mcp__workbar__progress with `done`, or new `steps` and `estimate_minutes` if this is different work."
+const NOTICE_MS = 3 * 60_000 // how long a notice stays in the band
 const TASKS_PANE = 'workbar-tasks'
 const CHROME_PREFIX = 'mcp__claude-in-chrome__'
 const CHROME_DOWN = /not connected|receiving end does not exist|not detected|no browser (is )?connected/i
 const CHROME_NOTE =
   'The user has been shown how to reconnect the Chrome extension (/chrome, then Reconnect extension). Do not switch approach or drop the browser step: say in one line what you need the browser for, then wait for the user to say it is reconnected, and retry.'
 
-const EMPTY_LIVE: Live = { isWorking: false, startedAt: 0, tools: 0, lastAction: '', plan: null, waitingSince: 0, lastRun: null }
+const EMPTY_LIVE: Live = {
+  isWorking: false,
+  startedAt: 0,
+  tools: 0,
+  lastAction: '',
+  plan: null,
+  waitingSince: 0,
+  lastRun: null,
+  carryPlan: false,
+  endedAt: 0,
+  nudged: false,
+}
 const EMPTY_HEALTH: Health = {
   tokens: 0,
   prompts: 0,
@@ -82,6 +104,11 @@ const EMPTY_HEALTH: Health = {
   paceBases: [],
   costUsd: 0,
   limitNoticeAt: 0,
+  compactStartedAt: 0,
+  compactedAt: 0,
+  compactedFrom: 0,
+  compactedTo: 0,
+  promptsAtCompact: 0,
 }
 
 const live = atom({ plugin: 'workbar', key: 'live' } as const, EMPTY_LIVE)
@@ -94,6 +121,27 @@ const agents = atom({ plugin: 'workbar', key: 'agents' } as const, [] as AgentRu
 const files = atom({ plugin: 'workbar', key: 'files' } as const, [] as FileTouch[])
 const filesOpen = atom({ plugin: 'workbar', key: 'filesOpen' } as const, false)
 const asking = atom({ plugin: 'workbar', key: 'asking' } as const, null as string | null)
+const notice = atom({ plugin: 'workbar', key: 'notice' } as const, null as Notice)
+
+async function say($: EngineInterface, text: string, tone: 'info' | 'warning' = 'info') {
+  const at = await $.clock.now()
+  await update($, notice, () => ({ text, tone, until: at + NOTICE_MS }))
+}
+
+// Whether Claude is offered the progress tool in this chat (null: not known yet), from the last prompt built.
+let progressOffered: boolean | null = null
+
+// Why there is no progress bar while Claude works: a full line for the band, a short one for the status line.
+function noPlanReason(l: Live): { long: string; short: string } {
+  if (!opts.progressTool) return { long: 'No progress bar: plans are off in /config (workbar), and Claude keeps no todo list here', short: 'no plan (plans off)' }
+  if (progressOffered === false) return { long: 'No progress bar: the progress tool is not loaded in this chat. Run /reload-plugins', short: 'no plan: /reload-plugins' }
+  if (l.tools === 0) return { long: 'Thinking. A progress bar appears if this takes several steps', short: 'thinking' }
+  if (l.tools <= QUICK_TOOLS) return { long: 'Quick task: no progress bar needed', short: `quick task · ${plural(l.tools, 'tool')}` }
+  return { long: l.nudged ? 'No plan from Claude yet: asked it for one' : 'No plan from Claude yet', short: `no plan yet · ${plural(l.tools, 'tool')}` }
+}
+
+// Claude's task list (TaskCreate / TaskUpdate), kept by id, for the bar when it reports no plan.
+const tasks = new Map<string, { content: string; status: string }>()
 
 // Facts about this machine and session, read once at session start.
 let sessionCwd = ''
@@ -287,6 +335,7 @@ async function syncStatus($: EngineInterface) {
     const agentsTxt = running ? ` · ${plural(running, 'agent')}` : ''
     let text: string | undefined
     if (ask) text = `◆ ${ask}`
+    else if (h.compactStartedAt) text = `◐ compacting · ${fmtDur(now - h.compactStartedAt)}`
     else if (!l.isWorking && isLimitHit(h, now)) text = '★ Log in to continue'
     else if (l.isWorking && st) text = `▲ ${st.count} failed ${st.tool} calls in a row${agentsTxt}`
     else if (l.isWorking && l.plan && l.plan.steps.length > 0) {
@@ -294,6 +343,7 @@ async function syncStatus($: EngineInterface) {
       const left = timeLeft(p, now, await calibration($), l.waitingSince)
       text = `▶ ${p.done}/${p.steps.length}${left ? ` · ${left}` : ''}${agentsTxt}`
     } else if (running > 0) text = `● ${plural(running, 'agent')} running`
+    else if (l.isWorking) text = `○ ${noPlanReason(l).short}`
     else if (held) text = `‖ message held · ${held.isNewTask ? 'Hand off' : 'Compact'} ★`
     else if (!l.isWorking && h.tokens > 0) {
       const lv = level(h, now)
@@ -312,6 +362,12 @@ async function syncStatus($: EngineInterface) {
   }
 }
 
+// A chat-size reading, unless it is the pre-compaction size Claude Code still reports until the next reply.
+function withReading(h: Health, reading: number): Health {
+  const r = freshTokens(reading, h.tokens, h.compactedFrom ?? 0)
+  return r.isStale ? h : { ...h, tokens: r.tokens, compactedFrom: 0 }
+}
+
 async function refreshTokens($: EngineInterface) {
   try {
     const usage = await $.session.usage()
@@ -319,8 +375,7 @@ async function refreshTokens($: EngineInterface) {
     const at = await $.clock.now()
     const limits = usage.rateLimits.map(r => ({ kind: r.kind, pct: r.percentUsed, resetsAt: r.resetsAt ?? '' }))
     await update($, health, h => ({
-      ...h,
-      tokens,
+      ...withReading(h, tokens),
       lastResponseAt: at,
       limits,
       paceBases: nextPaceBases(h.paceBases ?? [], limits, at),
@@ -348,24 +403,38 @@ const LEVEL_RANK: Record<Level, number> = { ok: 0, amber: 1, cold: 2, red: 2 }
 let lastAdvised: Level = 'ok'
 
 // Same task, big chat: compact in place (keeps this session: approvals, background tasks, browser tabs).
+// Compacted since your last message: there is nothing new to summarise yet.
+const justCompacted = (h: Health) => (h.compactedAt ?? 0) > 0 && h.prompts === (h.promptsAtCompact ?? -1)
+const compactedLine = (h: Health) =>
+  `Compacted at ${hhmm(new Date(h.compactedAt ?? 0))}${(h.compactedTo ?? 0) > 0 ? `: now ${fmtK(h.compactedTo ?? 0)}` : ''}`
+
 async function compactNow($: EngineInterface, thenSend?: string) {
   const h = await read($, health)
+  if (h.compactStartedAt) {
+    await say($, `Already compacting (${fmtDur((await $.clock.now()) - h.compactStartedAt)} so far). The size updates when it finishes.`, 'warning')
+    return
+  }
   if (h.isCompacting || h.isHandingOff) return
-  await update($, health, x => ({ ...x, isCompacting: true }))
+  if (justCompacted(h) && !thenSend) {
+    await say($, `Nothing new to compact. ${compactedLine(h)}, and no message has been sent since.`, 'warning')
+    return
+  }
+  const at = await $.clock.now()
+  await update($, health, x => ({ ...x, isCompacting: true, compactStartedAt: x.compactStartedAt || at }))
+  await syncStatus($)
   $.ui.toast('Compacting this chat…')
   $.clock.after(50, async () => {
     try {
       const r = await $.session.compact({ instructions: COMPACT_FOCUS })
-      if ('skip' in r && r.skip) {
-        $.ui.toast(`Compact skipped: ${r.skip}`)
-        return
-      }
+      if ('skip' in r && r.skip) return // the session.compact hook has said why
       await update($, hold, () => null)
       if (thenSend) await $.prompt.submit({ text: thenSend, asUser: true })
-    } catch {
-      $.ui.toast('Compact failed. Run /compact yourself, or /handoff.')
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err)
+      await say($, /not enough|too few/i.test(why) ? compactSkipText(why, justCompacted(await read($, health))) : `Compact failed: ${clip(why, 100)}. Try /compact, or Hand off.`, 'warning')
     } finally {
-      await update($, health, x => ({ ...x, isCompacting: false }))
+      await update($, health, x => ({ ...x, isCompacting: false, compactStartedAt: 0 }))
+      await syncStatus($)
     }
   })
 }
@@ -438,7 +507,30 @@ function advancePlan(prev: Plan | null, steps: string[], estimateMin: number, do
   while (doneAt.length < done) doneAt.push(at)
   while (doneActive.length < done) doneActive.push(activeNow)
   const est = estimateMin > 0 ? estimateMin : prev?.estimateMin ?? 0
-  return { steps, estimateMin: est, firstEstimateMin: prev?.firstEstimateMin || est, done, startedAt, doneAt, doneActive, waitMs, source }
+  return { steps, estimateMin: est, firstEstimateMin: prev?.firstEstimateMin || est, done, startedAt, doneAt, doneActive, waitMs, source, sampled: prev?.sampled }
+}
+
+// Claude's task list as a plan. A new list after a finished one starts over.
+function planFromTasks(prev: Plan | null, at: number): Plan | null {
+  return planFromTodos(prev, [...tasks.values()], at)
+}
+function trackTask(tool: string, args: Record<string, unknown>, result: unknown): boolean {
+  if (tool === 'TaskCreate') {
+    const id = (result as { task?: { id?: unknown } } | undefined)?.task?.id
+    if (typeof id !== 'string' && typeof id !== 'number') return false
+    if ([...tasks.values()].every(t => t.status === 'completed')) tasks.clear()
+    tasks.set(String(id), { content: String(args.subject ?? ''), status: 'pending' })
+    return true
+  }
+  if (tool === 'TaskUpdate') {
+    const id = String(args.taskId ?? '')
+    const t = tasks.get(id)
+    if (!t) return false
+    if (args.status === 'deleted') tasks.delete(id)
+    else tasks.set(id, { content: typeof args.subject === 'string' ? args.subject : t.content, status: typeof args.status === 'string' ? args.status : t.status })
+    return true
+  }
+  return false
 }
 
 export const register: Register = (on, options) => {
@@ -501,14 +593,11 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // The progress bar only exists when Claude can report a plan; say so once if the tool is missing.
-  let toolMissingSaid = false
+  // The progress bar only exists when Claude can report a plan; the band says so when the tool is missing.
+  // Only the main conversation's prompt counts (a subagent's has no Agent tool).
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
-    if (opts.progressTool && !toolMissingSaid && !e.tools.includes(PROGRESS_TOOL) && e.tools.includes('Agent')) {
-      toolMissingSaid = true
-      $.ui.log('workbar: Claude is not offered the progress tool in this chat, so the bar follows its todo list only. Run /reload-plugins, or start a new chat.')
-    }
+    if (e.tools.includes('Agent')) progressOffered = e.tools.includes(PROGRESS_TOOL)
     return r
   }).catch(($, e, next) => next(e))
 
@@ -521,6 +610,8 @@ export const register: Register = (on, options) => {
       await update($, files, () => [])
       await update($, asking, () => null)
       await update($, stuck, () => null)
+      await update($, notice, () => null)
+      tasks.clear()
     }
     return next(e)
   })
@@ -551,7 +642,11 @@ export const register: Register = (on, options) => {
 
     const p = l.plan
     if (!p || p.steps.length === 0) {
-      out.push(<Text key="noplan" dimColor>No plan yet. One shows when Claude works through several steps.</Text>)
+      out.push(
+        <Text key="noplan" dimColor>
+          {l.isWorking ? `${noPlanReason(l).long}.` : 'No plan for the last task. One shows when Claude works through several steps.'}
+        </Text>,
+      )
     } else {
       const left = timeLeft(p, now, calib, l.waitingSince)
       out.push(
@@ -648,6 +743,8 @@ export const register: Register = (on, options) => {
 
   // Keep the usage windows current between turns too, including the moment a limit is hit.
   on('session.measure', async ($, e, next) => {
+    const reading = e.context.tokens
+    if (e.changed.includes('context') && typeof reading === 'number' && reading > 0) await update($, health, h => withReading(h, reading))
     if (e.changed.includes('rateLimits')) {
       const at = await $.clock.now()
       const limits = e.rateLimits.map(r => ({ kind: r.kind, pct: r.percentUsed, resetsAt: r.resetsAt ?? '' }))
@@ -656,18 +753,52 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // Any compaction of the main chat (the band's button, /compact, auto): shown while it runs, and its
+  // result is the chat size until the next reply (Claude Code's own figure lags until then).
   on('session.compact', async ($, e, next) => {
-    const r = await next(e)
-    if (e.trigger !== 'precompute' && e.agentId === undefined && !('skip' in r && r.skip)) {
-      const at = await $.clock.now()
-      const after = 'tokensAfter' in r && typeof r.tokensAfter === 'number' ? r.tokensAfter : 0
-      await update($, health, x => ({ ...x, tokens: after, allowedUntilTokens: 0, lastResponseAt: at }))
-      lastAdvised = 'ok'
-      const before = 'tokensBefore' in r && typeof r.tokensBefore === 'number' ? r.tokensBefore : 0
-      if (before > 0) $.ui.toast(`Compacted: ${fmtK(before)} → ${after ? fmtK(after) : 'small'}`)
+    const isMain = e.trigger !== 'precompute' && e.agentId === undefined
+    if (isMain) {
+      const start = await $.clock.now()
+      await update($, health, x => ({ ...x, compactStartedAt: x.compactStartedAt || start }))
+      await syncStatus($)
+    }
+    let r: Awaited<ReturnType<typeof next>>
+    try {
+      r = await next(e)
+    } finally {
+      if (isMain) await update($, health, x => ({ ...x, compactStartedAt: 0 }))
+    }
+    if (!isMain) return r
+    try {
+      const h = await read($, health)
+      if ('skip' in r && r.skip) {
+        await say($, compactSkipText(r.skip, justCompacted(h)), 'warning')
+      } else {
+        const at = await $.clock.now()
+        const after = 'tokensAfter' in r && typeof r.tokensAfter === 'number' ? r.tokensAfter : 0
+        const before = 'tokensBefore' in r && typeof r.tokensBefore === 'number' && r.tokensBefore > 0 ? r.tokensBefore : h.tokens
+        await update($, health, x => ({
+          ...x,
+          tokens: after,
+          allowedUntilTokens: 0,
+          lastResponseAt: at,
+          compactedAt: at,
+          compactedFrom: before,
+          compactedTo: after,
+          promptsAtCompact: x.prompts,
+        }))
+        await update($, hold, () => null)
+        lastAdvised = 'ok'
+        const text = `Compacted ${before > 0 ? fmtK(before) : 'the chat'} → ${after ? fmtK(after) : 'small'}`
+        await say($, `${text}. Compact again once the chat has grown.`)
+        if (opts.band === 'off') $.ui.toast(text)
+      }
+      await syncStatus($)
+    } catch {
+      // the compaction itself is done; only the band's account of it is missing
     }
     return r
-  })
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'handoff' }, async $ => {
     void handOff($)
@@ -696,7 +827,8 @@ export const register: Register = (on, options) => {
     let reason = ''
     let isNewTask = false
     const agentsBusy = (await read($, agents)).some(a => a.status === 'running')
-    if (opts.holdMessages && !isRepeat && !agentsBusy && !isLimitHit(h, now) && h.tokens > h.allowedUntilTokens) {
+    const isFresh = justCompacted(h) || (h.compactStartedAt ?? 0) > 0 // nothing to gain from compacting again
+    if (opts.holdMessages && !isRepeat && !agentsBusy && !isFresh && !isLimitHit(h, now) && h.tokens > h.allowedUntilTokens) {
       const lv = level(h, now)
       if (lv === 'cold') {
         reason = `cache expired, this would re-send all ${fmtK(h.tokens)} at full price`
@@ -730,6 +862,7 @@ export const register: Register = (on, options) => {
     if (!result.drop) {
       await update($, agents, list => (list.some(a => a.status !== 'running') ? list.filter(a => a.status === 'running') : list))
       await update($, files, () => [])
+      await update($, notice, () => null)
       await update($, health, x => ({
         ...x,
         prompts: x.prompts + 1,
@@ -769,7 +902,14 @@ export const register: Register = (on, options) => {
       if ((await read($, health)).limitNoticeAt) await markLimit($, false) // logged in, or the limit reset
       errStreak = { tool: '', count: 0 }
       await update($, stuck, () => null)
-      await update($, live, l => ({ ...l, isWorking: true, startedAt: at, tools: 0, lastAction: '', plan: null, waitingSince: 0 }))
+      // An unfinished plan carries into this message ("continue", an answer to Claude's question), with
+      // the time between the two messages left out of its working time. It goes if Claude does not update it.
+      await update($, live, l => {
+        const p = l.carryPlan && l.plan ? l.plan : null
+        const gap = p && l.endedAt && l.endedAt >= p.startedAt ? Math.max(0, at - l.endedAt) : 0
+        const plan = p ? { ...p, carried: true, waitMs: p.waitMs + gap } : null
+        return { ...l, isWorking: true, startedAt: at, tools: 0, lastAction: '', plan, waitingSince: 0, carryPlan: false, nudged: false }
+      })
       await markActivity($, 'busy')
       await syncStatus($)
     }
@@ -792,12 +932,15 @@ export const register: Register = (on, options) => {
     }
     const at = await $.clock.now()
     await update($, live, l => {
-      const prev = l.plan?.source === 'progress' ? l.plan : null
-      const steps = Array.isArray(args.steps) ? args.steps.map(s => clip(String(s), 80)).filter(Boolean).slice(0, 20) : prev?.steps ?? []
+      const newSteps = Array.isArray(args.steps) ? args.steps.map(s => clip(String(s), 80)).filter(Boolean).slice(0, 20) : null
+      // A plan carried from your last message continues only if this one is the same work.
+      const isNewWork = !!l.plan?.carried && !!newSteps && !sharesStep(l.plan.steps, newSteps)
+      const prev = l.plan?.source === 'progress' && !isNewWork ? l.plan : null
+      const steps = newSteps ?? prev?.steps ?? []
       const est = typeof args.estimate_minutes === 'number' && args.estimate_minutes > 0 ? args.estimate_minutes : 0
       const done = typeof args.done === 'number' ? Math.max(0, Math.min(steps.length, Math.floor(args.done))) : prev?.done ?? 0
       // A plan that switches from the todo list keeps its start, so elapsed time stays honest.
-      const base = prev ?? (l.plan ? { ...l.plan, done: 0, doneAt: [], doneActive: [], firstEstimateMin: 0, estimateMin: 0 } : null)
+      const base = prev ?? (l.plan && !isNewWork ? { ...l.plan, done: 0, doneAt: [], doneActive: [], firstEstimateMin: 0, estimateMin: 0 } : null)
       return { ...l, plan: advancePlan(base, steps, est, done, at, 'progress') }
     })
     await syncStatus($)
@@ -845,7 +988,15 @@ export const register: Register = (on, options) => {
       if (tool === 'TodoWrite' && !ran.isError && Array.isArray(any.todos)) {
         const at = await $.clock.now()
         await update($, live, l =>
-          l.plan?.source === 'progress' ? l : { ...l, plan: planFromTodos(l.plan, any.todos as { content: string; status: string }[], at) },
+          l.plan?.source === 'progress' && !l.plan.carried ? l : { ...l, plan: planFromTodos(l.plan?.source === 'todos' ? l.plan : null, any.todos as { content: string; status: string }[], at) },
+        )
+        await syncStatus($)
+      }
+      // Or its task list, the newer kind.
+      if ((tool === 'TaskCreate' || tool === 'TaskUpdate') && !ran.isError && ran.deny === undefined && trackTask(tool, any, ran.result)) {
+        const at = await $.clock.now()
+        await update($, live, l =>
+          l.plan?.source === 'progress' && !l.plan.carried ? l : { ...l, plan: planFromTasks(l.plan?.source === 'todos' ? l.plan : null, at) },
         )
         await syncStatus($)
       }
@@ -865,8 +1016,19 @@ export const register: Register = (on, options) => {
       }
     }
 
+    if (ran.deny !== undefined) return ran
+    let out = ran
+    // A task past a quick answer with no plan on screen: ask Claude for one, once per message.
+    if (agentId === undefined && tool !== PROGRESS_TOOL && !question && opts.progressTool && progressOffered !== false) {
+      const l = await read($, live)
+      if (l.isWorking && !l.nudged && l.tools > QUICK_TOOLS && (!l.plan || l.plan.carried)) {
+        await update($, live, x => ({ ...x, nudged: true }))
+        out = { ...ran, context: [...(ran.context ?? []), l.plan ? NUDGE_CARRIED_NOTE : NUDGE_NOTE] }
+      }
+    }
+
     // Browser extension dropped: show how to reconnect, and keep Claude from giving up on the browser step.
-    if (!tool.startsWith(CHROME_PREFIX) || ran.deny !== undefined) return ran
+    if (!tool.startsWith(CHROME_PREFIX)) return out
     const text = typeof ran.text === 'string' ? ran.text : ''
     if (ran.isError && CHROME_DOWN.test(text)) {
       const was = await read($, chrome)
@@ -875,10 +1037,10 @@ export const register: Register = (on, options) => {
         $.ui.toast('Chrome extension not connected: run /chrome and pick Reconnect extension.')
         void alert($, 'Chrome extension disconnected. In Claude Code run /chrome, then Reconnect extension.')
       }
-      return { ...ran, context: [...(ran.context ?? []), CHROME_NOTE] }
+      return { ...out, context: [...(out.context ?? []), CHROME_NOTE] }
     }
     if (!ran.isError) await update($, chrome, () => null)
-    return ran
+    return out
   }).catch(($, e, next) => next(e))
 
   // Claude Code's own "needs you" moments (a permission dialog, an MCP form).
@@ -933,17 +1095,24 @@ export const register: Register = (on, options) => {
     const l = await read($, live)
     const seconds = Math.round((at - l.startedAt) / 1000)
     const plan = l.plan
-    if (plan && !e.isAborted && plan.source === 'progress') {
+    let sampled = plan?.sampled ?? false
+    if (plan && !e.isAborted && plan.source === 'progress' && !plan.sampled && !plan.carried) {
       const sample = calibrationSample(plan, activeMinutes(plan, at, 0))
       if (sample !== null) {
         const ratios = ((await $.store.get('calib')) as number[] | undefined) ?? []
         await $.store.set('calib', [...ratios, sample].slice(-20))
+        sampled = true
       }
     }
+    // Unfinished and updated in this message: your next message continues it.
+    const carry = !!plan && plan.done < plan.steps.length && !plan.carried
     await update($, live, x => ({
       ...x,
       isWorking: false,
       waitingSince: 0,
+      plan: x.plan ? { ...x.plan, sampled } : x.plan,
+      carryPlan: carry,
+      endedAt: at,
       lastRun: { seconds, estimateMin: plan?.firstEstimateMin || null, steps: plan?.steps.length ?? 0, done: plan?.done ?? 0, tools: x.tools },
     }))
     await refreshTokens($)
@@ -978,25 +1147,26 @@ export const register: Register = (on, options) => {
     const ags = await read($, agents)
     const fl = await read($, files)
     const isFilesOpen = await read($, filesOpen)
+    const nt = await read($, notice)
     const now = await $.clock.now()
     const { Box, Button, Text } = $.ui.resolve(e)
 
     const running = ags.filter(a => a.status === 'running')
     const lv: Level = hs.tokens > 0 ? level(hs, now) : 'ok'
+    const compacting = (hs.compactStartedAt ?? 0) > 0
+    const note = nt && now < nt.until ? nt : null
     // While subagents run, the chat is not free: compacting or handing off now would lose their results.
     const isFree = !l.isWorking && running.length === 0
     // At the limit Compact and Hand off would fail too: offer only Log in.
     const limitHit = !l.isWorking && isLimitHit(hs, now)
-    const chatAlert = lv !== 'ok' && isFree && !limitHit
+    const chatAlert = lv !== 'ok' && isFree && !limitHit && !compacting
     const isRed = lv === 'red' || lv === 'cold'
     const plan = l.isWorking && l.plan && l.plan.steps.length > 0 ? l.plan : null
 
-    if (l.isWorking) {
-      // Claude Code's own spinner already says it is working and for how long; add only what it lacks.
-      if (!plan && ags.length === 0 && !cx && !st) return next(e)
-    } else {
-      const worthIt = held || cx || limitHit || chatAlert || ags.length > 0 || fl.length > 0
-      if (!worthIt && !(opts.band === 'always' && hs.tokens > 0)) return next(e)
+    // While Claude works the band always shows: the plan, or one line saying why there is none.
+    if (!l.isWorking) {
+      const worthIt = held || cx || limitHit || chatAlert || ags.length > 0 || fl.length > 0 || compacting || note
+      if (!worthIt && opts.band !== 'always') return next(e)
     }
 
     const cols = Math.max(20, e.props.bodyColumns ?? 80)
@@ -1006,7 +1176,7 @@ export const register: Register = (on, options) => {
 
     const state = l.isWorking
       ? { label: '', color: st ? 'warning' : 'claude' }
-      : running.length > 0
+      : running.length > 0 || compacting
         ? { label: 'WAITING', color: 'claude' }
         : held || cx || limitHit || (chatAlert && isRed)
           ? { label: 'ACTION', color: cx || isRed || limitHit ? 'error' : 'warning' }
@@ -1032,7 +1202,10 @@ export const register: Register = (on, options) => {
         return { text: `${limitLabel(x.kind)} ${Math.round(x.pct)}%${when}`, hot: x.pct >= 80 || !!full }
       })
     const lr = l.lastRun
-    const recap = !l.isWorking && lr && lr.seconds >= 60 && !narrow ? `  last ${fmtDur(lr.seconds * 1000)} · ${plural(lr.tools, 'tool')}` : ''
+    const recap =
+      !l.isWorking && lr && lr.seconds >= 60 && !narrow
+        ? `  last ${fmtDur(lr.seconds * 1000)} · ${plural(lr.tools, 'tool')}${lr.steps === 0 && lr.tools > QUICK_TOOLS ? ' · no plan' : ''}`
+        : ''
     const chatBits =
       hs.tokens > 0 ? (
         <Text key="chat" wrap="truncate-end">
@@ -1052,7 +1225,13 @@ export const register: Register = (on, options) => {
           <Text dimColor>{recap}</Text>
         </Text>
       ) : (
-        <Text key="chat"> </Text>
+        <Text key="chat" dimColor wrap="truncate-end">
+          {hs.compactedAt
+            ? `${compactedLine(hs)} · the size shows after the next reply`
+            : narrow
+              ? 'New chat'
+              : 'New chat · a progress bar shows when Claude works through several steps'}
+        </Text>
       )
     const badge = (
       <Text backgroundColor={state.color} color="inverseText" bold>
@@ -1079,32 +1258,47 @@ export const register: Register = (on, options) => {
           <Text dimColor>{'░'.repeat(barW - filled)}</Text>
           <Text bold> {String(Math.round(pct * 100)).padStart(3, ' ')}%</Text>
           <Text dimColor>{tail}</Text>
+          <Text dimColor>{plan.carried && !narrow ? '  · plan from your last message' : ''}</Text>
         </Text>,
       )
-      // One line: a strip of marks for every step, then the current one by name.
+      // At least one line of steps by name: the finished ones counted, then the current one and as
+      // many of the rest as the width allows. Replaced by the full list below whenever it fits.
       const cur = Math.min(plan.done, n - 1)
-      const strip = n <= 12 && inner >= 40
       stepsCompactAt = rows.length
       add(
         5,
-        <Text key="steps" wrap="truncate-end">
-          {strip ? (
-            <Text>
-              <Text color="success">{'✓'.repeat(Math.min(plan.done, n))}</Text>
-              <Text color="claude">{plan.done < n ? '▶' : ''}</Text>
-              <Text dimColor>{'○'.repeat(Math.max(0, n - plan.done - 1))} </Text>
-            </Text>
-          ) : (
-            ''
-          )}
-          <Text bold>
-            {strip ? '' : `Step ${cur + 1}/${n} · `}
-            {plan.steps[cur] ?? ''}
+        plan.done >= n ? (
+          <Text key="steps" color="success" wrap="truncate-end">
+            ✓ All {n} steps done <Text dimColor>· finishing up</Text>
           </Text>
-          {plan.done + 1 < n ? <Text dimColor>  next: {plan.steps[plan.done + 1]}</Text> : ''}
+        ) : (
+          <Text key="steps" wrap="truncate-end">
+            {plan.done > 0 ? <Text color="success">✓ {plan.done} done   </Text> : ''}
+            <Text color="claude" bold>
+              ▶ {plan.steps[cur] ?? ''}
+            </Text>
+            {plan.steps.slice(cur + 1).map((s, i) => (
+              <Text key={`n${i}`} dimColor>
+                {'   '}○ {s}
+              </Text>
+            ))}
+          </Text>
+        ),
+      )
+    } else if (l.isWorking) {
+      // ---- working with no plan: say why there is no bar ----
+      add(
+        6,
+        <Text key="noplan" wrap="truncate-end">
+          <Text color="claude">○ </Text>
+          {noPlanReason(l).long}
+          <Text dimColor>
+            {l.tools > 0 ? `  ·  ${plural(l.tools, 'tool')}` : ''}
+            {l.lastAction && !narrow ? `  ·  ${l.lastAction}` : ''}
+          </Text>
         </Text>,
       )
-    } else if (!l.isWorking) {
+    } else {
       // ---- between turns: badge, then the chat, or the agents still running ----
       add(
         6,
@@ -1131,6 +1325,26 @@ export const register: Register = (on, options) => {
         7,
         <Text key="stuck" color="warning" wrap="truncate-end">
           ▲ {st.count} failed {st.tool} calls in a row. <Text dimColor>Claude may be going in circles: Esc stops it so you can steer.</Text>
+        </Text>,
+      )
+    }
+
+    if (compacting) {
+      add(
+        8,
+        <Text key="compacting" wrap="truncate-end">
+          <Text color="claude">◐ </Text>
+          Compacting the chat · {fmtDur(now - (hs.compactStartedAt ?? now))} so far
+          <Text dimColor>{narrow ? '' : '. The size updates when it finishes.'}</Text>
+        </Text>,
+      )
+    }
+    if (note && !compacting) {
+      add(
+        7,
+        <Text key="notice" wrap="truncate-end" color={note.tone === 'warning' ? 'warning' : undefined} dimColor={note.tone === 'info'}>
+          {note.tone === 'warning' ? '▲ ' : '✓ '}
+          {note.text}
         </Text>,
       )
     }
@@ -1219,9 +1433,49 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // ---- fill what is left: agents first, then the full step list, then open file paths ----
+    // ---- fill what is left: every step by name first, then agents, then open file paths ----
     let used = rows.reduce((s, r) => s + r.rows, 0)
     const spare = () => Math.max(0, room - used)
+
+    // The full step list replaces the one-line view when it fits, with names as long as the room
+    // allows. Running agents keep one row for their summary; finished ones give way.
+    if (plan && stepsCompactAt >= 0 && plan.done < plan.steps.length) {
+      const reserve = running.length > 0 ? 1 : 0
+      for (const width of [48, 28, 18]) {
+        const chips = plan.steps.map(s => clip(s, width))
+        const need = wrappedRows(chips.reduce((s, c) => s + c.length + 5, 0), inner)
+        if (need - 1 > spare() - reserve) continue
+        rows[stepsCompactAt] = {
+          prio: 5,
+          rows: need,
+          el: (
+            <Text key="steps" wrap="wrap">
+              {chips.map((step, i) =>
+                i < plan.done ? (
+                  <Text key={`c${i}`} color="success">
+                    ✓ <Text dimColor>{step}</Text>
+                    {'   '}
+                  </Text>
+                ) : i === plan.done ? (
+                  <Text key={`c${i}`} color="claude" bold>
+                    ▶ {step}
+                    {'   '}
+                  </Text>
+                ) : (
+                  <Text key={`c${i}`} dimColor>
+                    ○ {step}
+                    {'   '}
+                  </Text>
+                ),
+              )}
+            </Text>
+          ),
+        }
+        used += need - 1
+        break
+      }
+    }
+
     const agentRows: Row[] = []
     if (ags.length > 0) {
       const ordered = [...running, ...ags.filter(a => a.status !== 'running')]
@@ -1283,41 +1537,6 @@ export const register: Register = (on, options) => {
         })
       }
       used += agentRows.length
-    }
-
-    // The full step list replaces the one-line strip when it fits.
-    if (plan && stepsCompactAt >= 0) {
-      const chips = plan.steps.map(s => clip(s, 28))
-      const need = wrappedRows(chips.reduce((s, c) => s + c.length + 5, 0), inner)
-      if (need - 1 <= spare()) {
-        rows[stepsCompactAt] = {
-          prio: 5,
-          rows: need,
-          el: (
-            <Text key="steps" wrap="wrap">
-              {chips.map((step, i) =>
-                i < plan.done ? (
-                  <Text key={`c${i}`} color="success">
-                    ✓ <Text dimColor>{step}</Text>
-                    {'   '}
-                  </Text>
-                ) : i === plan.done ? (
-                  <Text key={`c${i}`} color="claude" bold>
-                    ▶ {step}
-                    {'   '}
-                  </Text>
-                ) : (
-                  <Text key={`c${i}`} dimColor>
-                    ○ {step}
-                    {'   '}
-                  </Text>
-                ),
-              )}
-            </Text>
-          ),
-        }
-        used += need - 1
-      }
     }
 
     const fileRows: Row[] = []

@@ -70,6 +70,30 @@ export function calibrationSample(p: Plan, activeMin: number): number | null {
   return clamp(projected / p.firstEstimateMin, 0.03, 20)
 }
 
+// ---- after a compaction ----
+// Claude Code's context figure comes from the last reply, so until the next one it can still read the
+// size from before a compaction. A reading close to that old size is stale; the first lower one ends the guard.
+export function freshTokens(reading: number, current: number, compactedFrom: number): { tokens: number; isStale: boolean } {
+  if (compactedFrom > 0 && reading >= compactedFrom * 0.9) return { tokens: current, isStale: true }
+  return { tokens: reading, isStale: false }
+}
+
+// Why a compaction did not run, in words that say what to do next.
+export function compactSkipText(reason: string, justCompacted: boolean): string {
+  if (/not enough|too few|nothing to compact/i.test(reason)) {
+    return justCompacted
+      ? 'Nothing new to compact: this chat was just compacted. Compact again once it has grown.'
+      : 'Too few messages to compact yet: there is nothing to save.'
+  }
+  return `Compact did not run: ${clip(reason, 120)}`
+}
+
+// Two plans are the same piece of work when they share a step.
+export const sharesStep = (a: string[], b: string[]) => {
+  const seen = new Set(a.map(s => s.toLowerCase()))
+  return b.some(s => seen.has(s.toLowerCase()))
+}
+
 // ---- topic check, the free part ----
 const STOP = new Set(
   'that this with from have what when then them they your about into also just like make sure want need please could would should there their here will more some only than very each which while still after before because does done being been were these those other really thing things okay yeah'.split(' '),

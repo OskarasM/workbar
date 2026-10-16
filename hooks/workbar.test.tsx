@@ -82,28 +82,128 @@ test('a progress plan shows the current step, count and time left', async ($, on
   expect(await ui.find({ text: /left/ })).toBeDefined()
 })
 
-test('in a short band the steps fold into one line with the current step named', async ($, on) => {
+test('in a short band the steps fold into one line that names the current step and the ones after it', async ($, on) => {
   engine(on)
   await $.turn.start({ text: 'build', turnId: 't1b' })
   await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['Read the code', 'Write the mode', 'Test it', 'Ship'], estimate_minutes: 10, done: 1 } as never)
   const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: { ...(BAND as object), maxRows: 4, bodyColumns: 50 } } as never)
-  expect(await ui.find({ text: /Write the mode/ })).toBeDefined()
-  expect(await ui.find({ text: /next: Test it/ })).toBeDefined()
-  expect(await ui.find({ text: /○ Ship/ })).toBeUndefined()
+  expect(await ui.find({ text: /✓ 1 done/ })).toBeDefined()
+  expect(await ui.find({ text: /▶ Write the mode/ })).toBeDefined()
+  expect(await ui.find({ text: /○ Test it/ })).toBeDefined()
+  expect(await ui.find({ text: /○ Ship/ })).toBeDefined()
 })
 
-test('without a plan or agents the band stays out of the way while Claude works', async ($, on) => {
+test('without a plan the band says why there is no bar, and asks Claude for a plan once the task grows', async ($, on) => {
   engine(on)
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return (<Text>engine band</Text>) as never
-  })
   on('tool.call', () => ({ result: 'done' }) as never)
   await $.turn.start({ text: 'look around', turnId: 't2' })
-  await $.tool.call({ tool: 'Read', file_path: 'C:/x/Settings.cs' } as never)
   const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
-  expect(await ui.find({ text: /engine band/ })).toBeDefined()
-  expect(await ui.find({ text: /Settings\.cs/ })).toBeUndefined()
+  expect(await ui.find({ text: /Thinking\. A progress bar appears if this takes several steps/ })).toBeDefined()
+  const first = await $.tool.call({ tool: 'Read', file_path: 'C:/x/Settings.cs' } as never)
+  expect((first as { context?: string[] }).context).toBeUndefined()
+  expect(await ui.find({ text: /Quick task: no progress bar needed/ })).toBeDefined()
+  expect(await ui.find({ text: /Settings\.cs/ })).toBeDefined()
+  await $.tool.call({ tool: 'Read', file_path: 'C:/x/a.cs' } as never)
+  await $.tool.call({ tool: 'Read', file_path: 'C:/x/b.cs' } as never)
+  const fourth = await $.tool.call({ tool: 'Read', file_path: 'C:/x/c.cs' } as never)
+  expect(String((fourth as { context?: string[] }).context ?? '')).toMatch(/mcp__workbar__progress/)
+  expect(await ui.find({ text: /No plan from Claude yet: asked it for one/ })).toBeDefined()
+  const fifth = await $.tool.call({ tool: 'Read', file_path: 'C:/x/d.cs' } as never)
+  expect((fifth as { context?: string[] }).context).toBeUndefined() // once per message
+})
+
+test('with plans turned off the band says so, and Claude is never asked for one', { options: { progressTool: false } }, async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: 'done' }) as never)
+  await $.turn.start({ text: 'look around', turnId: 't2o' })
+  let context: unknown
+  for (let i = 0; i < 6; i++) context ??= ((await $.tool.call({ tool: 'Read', file_path: `C:/x/${i}.cs` } as never)) as { context?: string[] }).context
+  expect(context).toBeUndefined()
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
+  expect(await ui.find({ text: /plans are off in \/config/ })).toBeDefined()
+})
+
+test('when the progress tool is not loaded in the chat, the band says how to fix it', async ($, on) => {
+  engine(on)
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  on('tool.call', () => ({ result: 'done' }) as never)
+  await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: ['Agent', 'Read', 'Bash'], outputStyle: null, traits: [] } as never)
+  await $.turn.start({ text: 'look around', turnId: 't2m' })
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
+  expect(await ui.find({ text: /progress tool is not loaded in this chat\. Run \/reload-plugins/ })).toBeDefined()
+})
+
+test('every step is named before finished agents get a row', async ($, on) => {
+  engine(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'sonnet', agentId: `done${++n}` }) as never)
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  await $.turn.start({ text: 'fan out', turnId: 't8s' })
+  await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['Read the code', 'Find the cause', 'Fix the band', 'Run the tests', 'Update the docs'], estimate_minutes: 10, done: 2 } as never)
+  for (let i = 0; i < 3; i++) {
+    await $.agent.spawn({ prompt: 'dig', description: `Look into area ${i}`, subagentType: 'Explore' } as never)
+    await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: `a${i}`, reason: 'answer', agentId: `done${i + 1}` } as never)
+  }
+  // 7 rows: 2 for the border, 1 for the bar, 2 for the steps, 2 left for the finished agents
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: { ...(BAND as object), maxRows: 7, bodyColumns: 60 } } as never)
+  for (const step of [/✓ Read the code/, /✓ Find the cause/, /▶ Fix the band/, /○ Run the tests/, /○ Update the docs/]) expect(await ui.find({ text: step })).toBeDefined()
+  expect(await ui.find({ text: /Look into area 0/ })).toBeDefined()
+  expect(await ui.find({ text: /\+2 more/ })).toBeDefined()
+})
+
+test('an unfinished plan carries into your next message, and a different plan starts afresh', async ($, on) => {
+  engine(on)
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('store.set', () => ({ value: undefined }) as never)
+  on('tool.call', () => ({ result: 'done' }) as never)
+  await $.turn.start({ text: 'build it', turnId: 'c1' })
+  await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['Read', 'Write', 'Test'], estimate_minutes: 9, done: 1 } as never)
+  await $.turn.complete({ answer: 'Which colour?', durationMs: 1000, isAborted: false, turnId: 'c1', reason: 'answer' } as never)
+  await $.turn.start({ text: 'blue', turnId: 'c2' })
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
+  expect(await ui.find({ text: /▶ Write/ })).toBeDefined()
+  expect(await ui.find({ text: /plan from your last message/ })).toBeDefined()
+  // past a quick answer, Claude is asked to update it rather than for a new one
+  for (let i = 0; i < 3; i++) await $.tool.call({ tool: 'Read', file_path: `C:/x/${i}.cs` } as never)
+  const ask = await $.tool.call({ tool: 'Read', file_path: 'C:/x/3.cs' } as never)
+  expect(String((ask as { context?: string[] }).context ?? '')).toMatch(/still shows your plan/)
+  await $.tool.call({ tool: 'mcp__workbar__progress', done: 2 } as never)
+  expect(await ui.find({ text: /▶ Test/ })).toBeDefined()
+  expect(await ui.find({ text: /plan from your last message/ })).toBeUndefined()
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 'c2', reason: 'answer' } as never)
+  await $.turn.start({ text: 'now the footer', turnId: 'c3' })
+  await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['Find footer', 'Restyle'], estimate_minutes: 4 } as never)
+  expect(await ui.find({ text: /▶ Find footer/ })).toBeDefined()
+  expect(await ui.find({ text: /Test/ })).toBeUndefined()
+})
+
+test('a plan Claude did not touch in the next message is not carried again', async ($, on) => {
+  engine(on)
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('store.set', () => ({ value: undefined }) as never)
+  await $.turn.start({ text: 'build it', turnId: 'd1' })
+  await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['Read', 'Write', 'Test'], estimate_minutes: 9, done: 1 } as never)
+  await $.turn.complete({ answer: 'stopped', durationMs: 1000, isAborted: false, turnId: 'd1', reason: 'answer' } as never)
+  await $.turn.start({ text: 'what time is it?', turnId: 'd2' })
+  await $.turn.complete({ answer: 'noon', durationMs: 1000, isAborted: false, turnId: 'd2', reason: 'answer' } as never)
+  await $.turn.start({ text: 'thanks', turnId: 'd3' })
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
+  expect(await ui.find({ text: /▶ Write/ })).toBeUndefined()
+  expect(await ui.find({ text: /Thinking/ })).toBeDefined()
+})
+
+test('Claude’s task list (TaskCreate, TaskUpdate) drives the bar when it reports no plan', async ($, on) => {
+  engine(on)
+  let id = 0
+  on('tool.call', (_$, e) => ((e as { tool: string }).tool === 'TaskCreate' ? { result: { task: { id: String(++id), subject: 'x' } } } : { result: { success: true } }) as never)
+  await $.turn.start({ text: 'fix it', turnId: 'tk' })
+  for (const subject of ['Find the bug', 'Fix the bug', 'Add a test']) await $.tool.call({ tool: 'TaskCreate', subject, description: subject } as never)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' } as never)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' } as never)
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
+  expect(await ui.find({ text: /33%/ })).toBeDefined()
+  expect(await ui.find({ text: /▶ Fix the bug/ })).toBeDefined()
+  expect(await ui.find({ text: /○ Add a test/ })).toBeDefined()
 })
 
 test('while Claude shows a plan for approval the band gives up its room', async (t$, on) => {
@@ -501,4 +601,69 @@ test('Claude Code’s usage-limit notice brings up Log in, and /login clears it'
   await $.prompt.submit({ text: '/login', command: { name: 'login', args: '' } } as never)
   expect(await ui.find({ key: 'login' })).toBeUndefined()
   expect(await ui.find({ text: /engine band/ })).toBeDefined()
+})
+
+// ---- 0.4.0: compaction told plainly ----
+
+const SUMMARY = [{ role: 'user', text: 'Summary of the chat so far', toolUses: [] }]
+
+test('after a compaction the stale pre-compaction size never holds a message (the Arise case)', async ($, on) => {
+  engine(on)
+  bigChat(on, 360_000) // Claude Code keeps reporting the last reply's 360k until the next reply
+  on('clock.after', () => ({ value: undefined }) as never)
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 360_000, tokensAfter: 25_000 }) as never)
+  await $.turn.start({ text: 'long task', turnId: 'k1' })
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'k1', reason: 'answer' } as never)
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY } as never)
+  // a turn that ends before any new reply reads the old figure again
+  await $.turn.start({ text: 'x', turnId: 'k2' })
+  await $.turn.complete({ answer: '', durationMs: 10, isAborted: false, turnId: 'k2', reason: 'answer' } as never)
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
+  expect(await ui.find({ text: /Compacted 360k → 25k/ })).toBeDefined()
+  expect(await ui.find({ key: 'compact' })).toBeUndefined()
+  const r = await $.prompt.submit({ text: 'carry on with the same task please' } as never)
+  expect(r.drop).toBeUndefined()
+})
+
+test('a compaction that is skipped says why in the band', async ($, on) => {
+  engine(on)
+  bigChat(on)
+  on('session.compact', () => ({ skip: 'Not enough messages to compact.' }) as never)
+  await $.turn.start({ text: 'task', turnId: 'k3' })
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'k3', reason: 'answer' } as never)
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY } as never)
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
+  expect(await ui.find({ text: /Too few messages to compact yet/ })).toBeDefined()
+})
+
+test('while a compaction runs the band says so and offers no Compact', async (t$, on) => {
+  const $ = t$
+  engine(on)
+  bigChat(on)
+  let during: { text?: unknown; button?: unknown; status?: string } = {}
+  const status: (string | undefined)[] = []
+  on('ui.status', (_$, e) => {
+    status.push((e as { text?: string }).text)
+    return { value: undefined } as never
+  })
+  on('session.compact', async () => {
+    now += 90_000
+    const ui = await t$.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
+    during = { text: await ui.find({ text: /Compacting the chat · 1m 30s so far/ }), button: await ui.find({ key: 'compact' }), status: status[status.length - 1] }
+    return { messages: SUMMARY, tokensBefore: 320_000, tokensAfter: 30_000 } as never
+  })
+  await $.turn.start({ text: 'task', turnId: 'k4' })
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 'k4', reason: 'answer' } as never)
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY } as never)
+  expect(during.text).toBeDefined()
+  expect(during.button).toBeUndefined()
+  expect(during.status).toMatch(/^◐ compacting/)
+})
+
+test('a new chat in always mode shows the band from the start and says what it is for', { options: { band: 'always' } }, async ($, on) => {
+  engine(on)
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
+  expect(await ui.find({ text: /READY/ })).toBeDefined()
+  expect(await ui.find({ text: /New chat · a progress bar shows when Claude works through several steps/ })).toBeDefined()
 })

@@ -7,7 +7,9 @@ export type Plan = {
   doneAt: number[] // wall-clock time each step finished
   doneActive: number[] // minutes of work (waiting on you left out) when each step finished
   waitMs: number // time spent waiting on you since the plan started
-  source: 'progress' | 'todos' // Claude's progress reports, or its own todo list
+  source: 'progress' | 'todos' // Claude's progress reports, or its own todo or task list
+  carried?: boolean // brought over from your previous message and not updated by Claude since
+  sampled?: boolean // already counted towards calibration
 }
 
 export type Live = {
@@ -18,7 +20,13 @@ export type Live = {
   plan: Plan | null
   waitingSince: number // a question or plan dialog is open since then; 0 when none
   lastRun: { seconds: number; estimateMin: number | null; steps: number; done: number; tools: number } | null
+  carryPlan?: boolean // the plan was unfinished when the last turn ended: the next message continues it
+  endedAt?: number // when the last turn ended
+  nudged?: boolean // Claude was asked for a plan in this turn
 }
+
+// A short line the band keeps for a while: what just happened, or why an action did not run.
+export type Notice = { text: string; tone: 'info' | 'warning'; until: number } | null
 
 export type Health = {
   tokens: number
@@ -33,6 +41,11 @@ export type Health = {
   paceBases: { kind: string; resetsAt: string; pct: number; at: number }[]
   costUsd: number
   limitNoticeAt: number // when Claude Code said the usage limit was reached; 0 when it has not
+  compactStartedAt?: number // a compaction is running since then
+  compactedAt?: number // when this chat was last compacted
+  compactedFrom?: number // its size just before; readings near it until the next reply are stale
+  compactedTo?: number // its size just after (0: not reported)
+  promptsAtCompact?: number // messages sent before that compaction
 }
 
 export type Hold = { text: string; reason: string; isNewTask: boolean } | null
@@ -71,6 +84,7 @@ declare module 'claude-code' {
       files: FileTouch[]
       filesOpen: boolean
       asking: string | null
+      notice: Notice
     }
   }
 }

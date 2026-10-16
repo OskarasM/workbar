@@ -34,19 +34,20 @@ What it holds to:
 
 - **Small.** One band above the prompt, one status-line entry, two commands. No dashboards, no themes.
 - **Close to zero tokens.** Everything it shows comes from what Claude Code already knows. It never calls a model unless you press a button, or turn on the optional new-task check.
-- **Out of the way.** It appears when it has something to say, and steps aside for Claude Code's own dialogs.
+- **Out of the way, never a mystery.** While Claude works it shows the plan, or one line saying why there is none. Between tasks it appears when it has something to say. It steps aside for Claude Code's own dialogs.
 - **Terminal and desktop app alike.**
 
 ## What it does
 
 | Feature | What you get |
 |---|---|
-| Progress bar | Steps, % done, time left and a finish time, for any task of more than a few steps. |
+| Progress bar | Steps, % done, time left and a finish time, for any task of more than a few steps. Every step is named whenever the band has room; finished agents and file lists give way first. An unfinished plan carries into your next message ("continue", an answer to Claude's question). |
+| Never a silent band | While Claude works with no plan, the band says why: thinking, a quick task that needs none, no plan from Claude yet, plans turned off, or the progress tool not loaded (with the fix). |
 | Honest estimates | Models estimate how long a *person* would take. workbar learns from your finished tasks how long Claude really takes (median of the last 20), leaves out time spent waiting on you (questions, plan approval, permission prompts), and switches to the real pace once steps finish. |
 | Subagents | One row per agent: its task, tools used, time, current action and its own step count. Lots of agents collapse into a summary row. |
 | Files changed | Files Claude wrote, edited or deleted since your last message, folded into one line until you open it. |
 | Chat health | Chat size gauge, prompt-cache countdown, usage windows past 50% with a "full at this pace" time. |
-| Compact or Hand off | When the chat is big or the cache has gone cold: one press compacts in place (same task) or writes a handoff, clears, and puts it in the prompt box (new task). ★ marks the one that fits. |
+| Compact or Hand off | When the chat is big or the cache has gone cold: one press compacts in place (same task) or writes a handoff, clears, and puts it in the prompt box (new task). ★ marks the one that fits. A running compaction shows with its time, the result stays in the band for a few minutes, and a compact that cannot run says why. |
 | Message hold | A message into a huge or cold chat is held once with those two options; Enter again sends it anyway. |
 | Loop warning | Three failed tool calls in a row: a warning that Claude may be going in circles. |
 | Alerts | A pop-up when Claude needs approval, has waited 15 s on a question, or finishes a run of 2 minutes or more. |
@@ -61,6 +62,7 @@ What it holds to:
 |---|---|
 | The `progress` tool | Its description and schema are about 150 tokens, part of the cached tool list (read at a tenth of the price after the first request). |
 | Progress reports | A few dozen output tokens per report, sent alongside a tool call Claude was making anyway, so no extra round trips. Roughly 200 tokens for a typical task. |
+| Plan reminder | Claude often skips the plan on medium-sized work. Once a message has taken more than 3 tool calls with no plan, one note of about 35 tokens asks for one, at most once per message. Quick answers never get it. |
 | A message typed mid-task | About 30 tokens of context asking Claude to update the plan. |
 | Everything else | Drawn locally from what Claude Code already reports. No model calls. |
 | New-task check (off by default) | A free local word check first; only a message that shares almost no words with your recent ones goes to Haiku, as a note of about 150 tokens (never the chat). At list prices that is roughly a thousandth of one normal message in a 100k chat. |
@@ -106,13 +108,15 @@ The prompt cache lifetime is detected: 1 hour on a Claude subscription, 5 minute
 
 ## How the band stays on screen
 
-The band shares the bottom of the terminal with the prompt and Claude Code's own dialogs. Anything taller than its room scrolls in a small window, and on the main (non-fullscreen) screen a tall bottom area breaks the redraw. So workbar fits a fixed budget: at most a third of the terminal's height and never more than 12 rows, borders included. Every line truncates rather than wraps. When the room runs short, the actions stay and the details give way: done agents first, then the open file list, then the full step list (it folds into one line naming the current step). While Claude shows a question or a plan for approval, the band steps aside completely and the status line says what is waiting.
+The band shares the bottom of the terminal with the prompt and Claude Code's own dialogs. Anything taller than its room scrolls in a small window, and on the main (non-fullscreen) screen a tall bottom area breaks the redraw. So workbar fits a fixed budget: at most a third of the terminal's height and never more than 12 rows, borders included. Every line truncates rather than wraps. The step list comes first: every step by name, with names shortened before anything folds. When the room still runs short, the actions stay and the details give way: done agents first, then the open file list, and last the step list, which folds into one line naming the current step and as many of the next ones as fit. While Claude shows a question or a plan for approval, the band steps aside completely and the status line says what is waiting.
 
 ## Known limitations
 
 - The band is shared: only one mod draws above the prompt at a time. In `auto` mode workbar steps aside when there is nothing to show, so other mods' bands get their turn.
 - Files changed by scripts (`python`, `sed -i`, build tools) are not listed; only Claude's own Write/Edit tools and plain `rm`/`del` commands are.
-- The progress bar needs Claude to report a plan (or keep a todo list). Quick answers get none, on purpose.
+- The progress bar needs Claude to report a plan (or keep a todo or task list). Quick answers get none, on purpose, and the band says so.
+- The band is drawn in the terminal and the desktop app only; Claude Code does not offer it in VS Code, on the web or on mobile. There, `/tasks` and the status line still work.
+- Claude Code's `[-]` (or ctrl+x ctrl+a) collapses the band, and a mod cannot tell. If the band seems gone, press `[-]` again.
 - In organizations that manage Claude Code, a user-installed mod's `Notification` and `StopFailure` hooks do not run, so approval alerts are skipped there (the usage-limit Log in button still follows Claude Code's notice).
 - The band is tested on the terminal and desktop surfaces in Claude Code's test kit, and used daily on Windows 11 with Windows Terminal. The `/tasks` pane in the desktop app, and macOS and Linux, are less tried.
 

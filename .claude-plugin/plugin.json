@@ -1,6 +1,6 @@
 {
   "name": "workbar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Shows how far along Claude is and when it will really be done, what it is waiting on, what it changed, and when a chat is getting too big or going cold. Small, close to zero tokens, terminal and desktop app.",
   "author": {
     "name": "OskarasM",
@@ -23,7 +23,7 @@
     "band": {
       "type": "string",
       "title": "Band above the prompt",
-      "description": "auto: show the band only when there is something to see or do (a plan, agents, files changed, a warning); the chat size then lives in the status line. always: also show the chat-size gauge between tasks. off: status line only.",
+      "description": "auto: while Claude works the band always shows the plan, or why there is none; between tasks it shows only when there is something to see or do (agents, files changed, a warning), and the chat size lives in the status line. always: also show the chat-size gauge between tasks and in a new chat. off: status line only.",
       "default": "auto",
       "options": [
         "auto",
@@ -34,7 +34,7 @@
     "progressTool": {
       "type": "boolean",
       "title": "Ask Claude for a progress plan",
-      "description": "On: Claude reports steps and an estimate through a tiny tool (about 150 cached tokens per request, a few dozen per task). Off: no tokens at all; the bar then follows Claude's own todo list when it keeps one.",
+      "description": "On: Claude reports steps and an estimate through a tiny tool (about 150 cached tokens per request, a few dozen per task), and a message that runs past 3 tool calls with no plan gets one ~35-token reminder. Off: no tokens at all; the bar then follows Claude’s own todo or task list when it keeps one.",
       "default": true
     },
     "holdMessages": {

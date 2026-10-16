@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 (2026-10-16)
+
+The band never goes quiet without saying why, and compaction is told plainly.
+
+- While Claude works the band always shows: the plan, or one line saying why there is none (thinking, a quick task that needs none, no plan from Claude yet, plans turned off, or the progress tool not loaded, with the fix). The status line says the same. A new chat in `always` mode shows the band from the start.
+- Plan reminder: Claude skipped the plan on almost every task of 4-10 tool calls (1 in 38 over two days). A message that runs past 3 tool calls with no plan now gets one ~35-token note asking for one, at most once per message. Quick answers are untouched.
+- Every step is named: the full step list now comes before finished agents, step names shorten before the list folds, and the one-line fallback names the current step and as many of the next ones as fit, instead of a row of marks.
+- An unfinished plan carries into your next message ("continue", an answer to Claude's question), with the time between messages left out of its estimate. A different plan replaces it; one Claude leaves untouched is dropped after that message.
+- Claude's newer task list (TaskCreate, TaskUpdate) drives the bar too, like its todo list.
+- Fix: after a compaction the band kept the old chat size, held the next message as "chat is 360k" and offered Compact again, which then failed with "Not enough messages to compact". The compaction's result is now the size until the next reply.
+- A running compaction (the button, `/compact` or automatic) shows in the band and status line with its time, its result stays in the band for a few minutes, and a compaction that is skipped or fails says why in plain words. Compact is not offered while one runs, or right after one with nothing new to compact.
+- README: which Claude Code apps draw the band, and how a collapsed band comes back.
+
 ## 0.3.0 (2026-10-16)
 
 Smaller, cheaper, and ready for the desktop app.
