@@ -326,7 +326,9 @@ test('files Claude adds, changes and deletes show as one line that opens to full
   const win = (p: string) => p.split('/').join(String.fromCharCode(92)) // the band shows Windows paths
   const onDisk = new Set([win('C:/proj/src/old.ts'), win('C:/proj/src/app.ts')])
   on('fs.stat', (_$, e) => {
-    if (!onDisk.has((e as { path: string }).path)) throw new Error('ENOENT')
+    // On macOS and Linux the engine resolves a C:\ path against the real working folder first: match the end.
+    const asked = (e as { path: string }).path
+    if (![...onDisk].some(p => asked.endsWith(p))) throw new Error('ENOENT')
     return { value: { kind: 'file', size: 1, isLink: false } } as never
   })
   on('tool.call', (_$, e) => {
