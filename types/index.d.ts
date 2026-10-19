@@ -10,6 +10,9 @@ export type Plan = {
   source: 'progress' | 'todos' // Claude's progress reports, or its own todo or task list
   carried?: boolean // brought over from your previous message and not updated by Claude since
   sampled?: boolean // already counted towards calibration
+  baseDone?: number // steps already finished when the plan arrived: no time on its clock
+  estActive?: number // minutes of work when the latest estimate was given (it counts from then)
+  estDone?: number // steps done when the latest estimate was given
 }
 
 export type Live = {
@@ -23,6 +26,9 @@ export type Live = {
   carryPlan?: boolean // the plan was unfinished when the last turn ended: the next message continues it
   endedAt?: number // when the last turn ended
   nudged?: boolean // Claude was asked for a plan in this turn
+  reportedAt?: number // when Claude last reported progress
+  staleFrom?: number // tool calls counted at that report, or at the last reminder to send one
+  staleNudges?: number // reminders to report progress in this turn
 }
 
 // A short line the band keeps for a while: what just happened, or why an action did not run.
@@ -40,7 +46,8 @@ export type Health = {
   limits: { kind: string; pct: number; resetsAt: string }[]
   paceBases: { kind: string; resetsAt: string; pct: number; at: number }[]
   costUsd: number
-  limitNoticeAt: number // when Claude Code said the usage limit was reached; 0 when it has not
+  limitNoticeAt: number // when this chat learnt the usage limit was reached (its own notice or another chat's); 0 when not
+  limitFromOther?: boolean // learnt from another chat
   compactStartedAt?: number // a compaction is running since then
   compactedAt?: number // when this chat was last compacted
   compactedFrom?: number // its size just before; readings near it until the next reply are stale
@@ -68,9 +75,6 @@ export type AgentRun = {
   plan: { steps: number; done: number } | null
 }
 
-// A file Claude wrote, edited or deleted since your last message, by its full path.
-export type FileTouch = { path: string; kind: 'added' | 'changed' | 'removed' }
-
 declare module 'claude-code' {
   interface PluginState {
     workbar: {
@@ -81,8 +85,6 @@ declare module 'claude-code' {
       chrome: ChromeIssue
       stuck: Stuck
       agents: AgentRun[]
-      files: FileTouch[]
-      filesOpen: boolean
       asking: string | null
       notice: Notice
     }

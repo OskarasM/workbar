@@ -10,7 +10,7 @@
     {
       "name": "workbar",
       "source": "./",
-      "description": "Shows how far along Claude is and when it will really be done, what it is waiting on, what it changed, and when a chat is getting too big or going cold. Small, close to zero tokens, terminal and desktop app."
+      "description": "Shows how far along Claude is and when it will really be done, what it is waiting on, and when a chat is getting too big or going cold. Small, close to zero tokens, terminal and desktop app."
     }
   ]
 }

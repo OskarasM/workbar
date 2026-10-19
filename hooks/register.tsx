@@ -1,31 +1,34 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentRun, ChromeIssue, FileTouch, Health, Hold, Live, Notice, Plan, Stuck } from '../types'
+import type { AgentRun, ChromeIssue, Health, Hold, Live, Notice, Plan, Stuck } from '../types'
 import {
-  absPath,
   activeMinutes,
+  advancePlan,
   bandBudget,
   calibrationFrom,
   calibrationSample,
   clip,
   compactSkipText,
-  deleteTargets,
   fitRows,
   fmtDur,
   fmtK,
   fmtMin,
   freshTokens,
   hhmm,
+  isSharedLimitOn,
   limitLabel,
+  limitUntil,
   looksUnrelated,
   minutesLeft,
   nextPaceBases,
   paceFullAt,
+  parseSharedLimit,
   plural,
   sharesStep,
   wrappedRows,
 } from './lib'
+import type { SharedLimit } from './lib'
 
 // ---- options (Claude Code's /config, under workbar) ----
 type Opts = {
@@ -63,7 +66,7 @@ const STUCK_AFTER = 3 // failed tool calls in a row
 // One description, read by Claude with the tool list; nothing goes into CLAUDE.md or the system prompt.
 const PROGRESS_TOOL = 'mcp__workbar__progress'
 const PROGRESS_DESCRIPTION =
-  "Live progress bar for the user. For a task needing more than ~3 tool calls, call it first with `steps` (3-10 short labels) and `estimate_minutes`: your own wall-clock time to finish, usually minutes, not the hours a person would take. After each step, put `done` (steps finished) in the same response as your next tool call, never alone. If the plan changes, resend the full `steps` and a new estimate. Skip it for quick answers."
+  "Live progress bar for the user. For a task needing more than ~3 tool calls, call it first with `steps` (3-10 short labels for the whole task; count any already finished in `done`) and `estimate_minutes`: your own wall-clock minutes from now to finish, not the hours a person would take. Each time a step finishes, put `done` (steps finished) in the same response as your next tool call, never alone; the last step needs no call. If the plan changes, resend the full `steps`, `done` and a new estimate. Skip it for quick answers."
 const MIDRUN_NOTE = 'If this changes the work, resend mcp__workbar__progress with the full updated `steps` and estimate alongside your next tool call.'
 // Claude often skips the tool on work of 4-10 tool calls. One reminder per message, only once a task has
 // proved longer than a quick answer, so short replies cost nothing.
@@ -72,6 +75,15 @@ const NUDGE_NOTE =
   'This task is taking several steps: send mcp__workbar__progress (`steps`, `estimate_minutes`) alongside your next tool call so the user can see progress.'
 const NUDGE_CARRIED_NOTE =
   "The progress bar still shows your plan from the user's last message: alongside your next tool call send mcp__workbar__progress with `done`, or new `steps` and `estimate_minutes` if this is different work."
+// A plan left behind the work: after this many tool calls and this long with no report, one short note
+// (about 30 tokens) reminds Claude to send `done`, at most a few times per message.
+const STALE_TOOLS = 6
+const STALE_MS = 90_000
+const STALE_NUDGES = 3
+const staleNote = (p: Plan) =>
+  `The progress bar shows step ${p.done + 1}/${p.steps.length} "${p.steps[p.done] ?? ''}". If steps have finished since, send mcp__workbar__progress with \`done\` alongside your next tool call.`
+// A report older than this, with tool calls since, is marked in the band so a lagging bar is not taken at its word.
+const REPORT_OLD_MS = 3 * 60_000
 const NOTICE_MS = 3 * 60_000 // how long a notice stays in the band
 const TASKS_PANE = 'workbar-tasks'
 const CHROME_PREFIX = 'mcp__claude-in-chrome__'
@@ -118,8 +130,6 @@ const tick = atom({ plugin: 'workbar', key: 'tick' } as const, 0)
 const chrome = atom({ plugin: 'workbar', key: 'chrome' } as const, null as ChromeIssue)
 const stuck = atom({ plugin: 'workbar', key: 'stuck' } as const, null as Stuck)
 const agents = atom({ plugin: 'workbar', key: 'agents' } as const, [] as AgentRun[])
-const files = atom({ plugin: 'workbar', key: 'files' } as const, [] as FileTouch[])
-const filesOpen = atom({ plugin: 'workbar', key: 'filesOpen' } as const, false)
 const asking = atom({ plugin: 'workbar', key: 'asking' } as const, null as string | null)
 const notice = atom({ plugin: 'workbar', key: 'notice' } as const, null as Notice)
 
@@ -144,19 +154,19 @@ function noPlanReason(l: Live): { long: string; short: string } {
 const tasks = new Map<string, { content: string; status: string }>()
 
 // Facts about this machine and session, read once at session start.
-let sessionCwd = ''
-let home = ''
 let isWindows = false
 let settingsTtl: '5m' | '1h' | '' = ''
 let hasActivityDir = false
+let sharedDir = '' // where every chat on this machine reads and writes the usage-limit flag
 let errStreak = { tool: '', count: 0 }
-const SESSION_TAG = crypto.randomUUID()
 
 // ---- activity markers for your own scripts ----
-async function markActivity($: EngineInterface, state: 'busy' | 'idle') {
+// Named after the session, which outlives a reload of this module, so a reload never leaves a "busy" file behind.
+async function markActivity($: EngineInterface, state: 'busy' | 'idle', sessionId?: string) {
   if (!hasActivityDir) return
   try {
-    await $.fs.write(`${opts.activityDir.replace(/[\\/]+$/, '')}/${SESSION_TAG}.txt`, `${state} ${await $.clock.now()}`)
+    const id = (sessionId ?? (await $.session.id())).replace(/[^\w.-]/g, '_')
+    await $.fs.write(`${opts.activityDir.replace(/[\\/]+$/, '')}/${id}.txt`, `${state} ${await $.clock.now()}`)
   } catch {
     // a script reading these falls back to its own timeout
   }
@@ -195,74 +205,6 @@ async function alert($: EngineInterface, text: string) {
   }
 }
 
-// ---- files touched since your last message ----
-const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
-const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
-type FileOp = { path: string; kind: 'edit' | 'delete'; existed: boolean }
-const toAbs = (raw: string) => absPath(raw, sessionCwd, home, isWindows)
-
-async function exists($: EngineInterface, path: string): Promise<boolean> {
-  try {
-    await $.fs.stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function filesBefore($: EngineInterface, tool: string, args: Record<string, unknown>): Promise<FileOp[]> {
-  if (EDIT_TOOLS.has(tool)) {
-    const raw = String(args.file_path ?? args.notebook_path ?? '')
-    if (!raw) return []
-    const path = toAbs(raw)
-    return [{ path, kind: 'edit', existed: await exists($, path) }]
-  }
-  if (SHELL_TOOLS.has(tool) && typeof args.command === 'string') {
-    const ops: FileOp[] = []
-    for (const path of deleteTargets(args.command).map(toAbs)) if (await exists($, path)) ops.push({ path, kind: 'delete', existed: true })
-    return ops
-  }
-  return []
-}
-
-function mergeFiles(list: FileTouch[], changes: FileTouch[]): FileTouch[] {
-  const key = (p: string) => (isWindows ? p.toLowerCase() : p)
-  const map = new Map(list.map(f => [key(f.path), f] as const))
-  for (const c of changes) {
-    const k = key(c.path)
-    const prev = map.get(k)
-    if (!prev) map.set(k, c)
-    else if (c.kind === 'removed') {
-      if (prev.kind === 'added') map.delete(k) // made and deleted within the task: nothing to show
-      else map.set(k, c)
-    } else if (prev.kind === 'removed') map.set(k, { path: c.path, kind: 'changed' })
-  }
-  return [...map.values()].slice(-300)
-}
-
-async function filesAfter($: EngineInterface, ops: FileOp[], isOk: boolean) {
-  const changes: FileTouch[] = []
-  for (const op of ops) {
-    if (op.kind === 'edit') {
-      if (isOk) changes.push({ path: op.path, kind: op.existed ? 'changed' : 'added' })
-    } else if (!(await exists($, op.path))) changes.push({ path: op.path, kind: 'removed' })
-  }
-  if (changes.length > 0) await update($, files, list => mergeFiles(list, changes))
-}
-
-const FILE_MARK: Record<FileTouch['kind'], { sign: string; color: string; order: number }> = {
-  added: { sign: '+', color: 'success', order: 0 },
-  changed: { sign: '~', color: 'warning', order: 1 },
-  removed: { sign: '−', color: 'error', order: 2 },
-}
-const fileSummary = (list: FileTouch[]) =>
-  (['changed', 'added', 'removed'] as const)
-    .map(k => [k, list.filter(f => f.kind === k).length] as const)
-    .filter(([, n]) => n > 0)
-    .map(([k, n]) => `${n} ${k}`)
-    .join(' · ')
-const sortFiles = (list: FileTouch[]) => [...list].sort((a, b) => FILE_MARK[a.kind].order - FILE_MARK[b.kind].order)
-
 // Claude asking you something: the dialog stays open exactly as long as the tool call does.
 const QUESTION_TOOLS: Record<string, string> = { AskUserQuestion: 'Claude has a question for you', ExitPlanMode: 'Claude has a plan for you to approve' }
 
@@ -276,8 +218,11 @@ Output only the prompt itself, no preamble or closing remarks. Cover, concisely:
 6. Files to read first (paths only; if the project has docs/STATE.md, list it first).
 Point to files rather than pasting their contents. Stay under 350 words unless more is truly needed.`
 
+// Each finished plan's actual/estimated. Before 0.5.0 a plan sent a few tool calls in counted its
+// already-finished steps as instant, so those samples ran short; they stay behind under the old key.
+const CALIB_KEY = 'calib2'
 async function calibration($: EngineInterface): Promise<number> {
-  return calibrationFrom((await $.store.get('calib')) as number[] | undefined)
+  return calibrationFrom((await $.store.get(CALIB_KEY)) as number[] | undefined)
 }
 
 // 1 hour on a Claude subscription (it reports usage windows), 5 minutes otherwise, unless promptCacheTtl says.
@@ -298,13 +243,97 @@ function level(h: Health, now: number): Level {
 
 // A usage limit reached: Claude Code says so itself; the band only adds a way to switch account. Its notice
 // is the reliable sign (a turn can end normally on a grace allowance with the window under 100%).
-const LIMIT_TEXT = /usage limit reached|limit reached|reached your (?:usage |weekly |session )?limit|out of (?:extra )?usage/i
+// Never a bare "limit reached": Claude Code's "Context limit reached" is about this chat alone.
+const LIMIT_TEXT = /usage limit reached|(?:5-hour|session|weekly|opus|sonnet) limit reached|(?:hit|reached) your (?:usage |weekly |session )?limit|out of (?:extra )?usage/i
 const isLimitHit = (h: Health, now: number) =>
   (h.limitNoticeAt ?? 0) > 0 || h.limits.some(x => x.pct >= 100 && (!x.resetsAt || !(Date.parse(x.resetsAt) <= now)))
-async function markLimit($: EngineInterface, hit: boolean) {
-  const at = hit ? await $.clock.now() : 0
-  await update($, health, h => ({ ...h, limitNoticeAt: at, limits: hit ? h.limits : h.limits.filter(x => x.pct < 100) }))
+
+// The limit is the account's, so every chat on this machine shares one flag file: the chat that hits
+// it writes it, the others read it on their 5 s tick and show Log in too, and a chat that starts a
+// request meanwhile pauses and asks first. A login anywhere, or any chat's next reply, clears it.
+let sharedLimit: SharedLimit | null = null // the flag as last read or written
+let lastOkAt = 0 // when this chat's last request that got a reply was sent
+const limitPath = () => `${sharedDir}/limit.json`
+
+async function readSharedLimit($: EngineInterface): Promise<SharedLimit | null> {
+  if (!sharedDir) return null
+  try {
+    sharedLimit = parseSharedLimit(String(await $.fs.read(limitPath())))
+  } catch {
+    sharedLimit = null // no file: no chat has hit a limit
+  }
+  return sharedLimit
+}
+async function writeSharedLimit($: EngineInterface, s: SharedLimit) {
+  sharedLimit = s
+  if (!sharedDir) return
+  try {
+    await $.fs.write(limitPath(), JSON.stringify(s))
+  } catch {
+    // the other chats find out from their own next request instead
+  }
+}
+
+// scope 'all': this chat learnt it first-hand (a notice, a login), so every chat hears. 'here': only this chat's view.
+async function markLimit($: EngineInterface, hit: boolean, scope: 'all' | 'here' = 'all') {
+  const at = await $.clock.now()
+  await update($, health, h => ({ ...h, limitNoticeAt: hit ? at : 0, limitFromOther: false, limits: hit ? h.limits : h.limits.filter(x => x.pct < 100) }))
+  if (scope === 'all') {
+    const prev = await readSharedLimit($)
+    if (hit) {
+      await writeSharedLimit($, { hitAt: at, until: limitUntil((await read($, health)).limits, at), clearedAt: prev?.clearedAt ?? 0 })
+      if (!isSharedLimitOn(prev, at, lastOkAt)) void alert($, 'Usage limit reached. Log in from any chat; the others wait for it.')
+    } else if (prev && prev.hitAt > prev.clearedAt) {
+      await writeSharedLimit($, { ...prev, clearedAt: at })
+    }
+  }
   await syncStatus($)
+}
+
+// On the tick: take up another chat's limit, or drop this one's once a login anywhere has cleared it.
+async function syncSharedLimit($: EngineInterface) {
+  if (!sharedDir) return
+  const s = await readSharedLimit($)
+  const now = await $.clock.now()
+  const h = await read($, health)
+  if (s && isSharedLimitOn(s, now, lastOkAt)) {
+    if (h.limitNoticeAt) return
+    await update($, health, x => ({ ...x, limitNoticeAt: s.hitAt, limitFromOther: true }))
+    await syncStatus($)
+  } else if (h.limitNoticeAt && s && s.clearedAt >= h.limitNoticeAt) {
+    await update($, health, x => ({ ...x, limitNoticeAt: 0, limitFromOther: false, limits: x.limits.filter(l => l.pct < 100) }))
+    await syncStatus($)
+  }
+}
+
+// A request about to go out while the account is at its limit: ask before sending it, so the chat
+// waits for the login and then carries on by itself. One question at a time, however many requests wait.
+const ASK_CONTINUE = 'Continue'
+const ASK_LOGIN = 'Log in here'
+const ASK_STOP = 'Stop'
+let pausing: Promise<'go' | 'stop'> | null = null
+let mainTurnId = '' // the main loop's running turn, which Stop ends
+
+// The dialog is an AskUserQuestion call, so the tool.call hook below shows it in the status line, keeps
+// its time out of the estimate and alerts after a while, as for Claude's own questions.
+const PAUSED = 'Paused at the usage limit: log in, then Continue'
+async function askToContinue($: EngineInterface): Promise<'go' | 'stop'> {
+  let pick: string
+  try {
+    pick = await $.ui.ask(
+      'The usage limit is reached, so this chat is paused before its next request. Log in (Log in in another chat, or here), then Continue. Continue?',
+      { header: 'Usage limit', options: [ASK_CONTINUE, ASK_LOGIN, ASK_STOP] },
+    )
+  } catch {
+    pick = ASK_CONTINUE // dismissed, or nobody to ask: send it, and Claude Code says if it fails
+  }
+  if (pick === ASK_STOP) return 'stop'
+  if (pick === ASK_LOGIN) {
+    $.clock.after(200, () => void $.command.run({ command: 'login' }).catch(() => undefined))
+    return 'stop'
+  }
+  await markLimit($, false) // you say it is sorted: the other chats go on too
+  return 'go'
 }
 
 // Unfinished plan or a same-task message: Compact. Finished plan or a new-task message: Hand off.
@@ -318,6 +347,14 @@ function timeLeft(p: Plan, now: number, calib: number, waitingSince: number): st
   if (p.done >= p.steps.length) return 'finishing up'
   const mins = minutesLeft(p, now, calib, waitingSince)
   return mins === null ? '' : `~${fmtMin(mins)} left`
+}
+
+// "report 4m old" once Claude's last progress report is old and work has gone on since: the bar may lag.
+function reportAge(l: Live, now: number): string {
+  const p = l.plan
+  if (!p || p.source !== 'progress' || p.carried || !l.reportedAt || p.done >= p.steps.length) return ''
+  const age = now - l.reportedAt
+  return age >= REPORT_OLD_MS && l.tools > (l.staleFrom ?? 0) ? `report ${Math.floor(age / 60000)}m old` : ''
 }
 
 // Claude Code's own status line slot for this mod: the one thing that matters, even with the band folded.
@@ -338,10 +375,12 @@ async function syncStatus($: EngineInterface) {
     else if (h.compactStartedAt) text = `◐ compacting · ${fmtDur(now - h.compactStartedAt)}`
     else if (!l.isWorking && isLimitHit(h, now)) text = '★ Log in to continue'
     else if (l.isWorking && st) text = `▲ ${st.count} failed ${st.tool} calls in a row${agentsTxt}`
+    else if (l.isWorking && h.limitNoticeAt) text = `▲ usage limit: pauses before its next request${agentsTxt}`
     else if (l.isWorking && l.plan && l.plan.steps.length > 0) {
       const p = l.plan
       const left = timeLeft(p, now, await calibration($), l.waitingSince)
-      text = `▶ ${p.done}/${p.steps.length}${left ? ` · ${left}` : ''}${agentsTxt}`
+      const age = reportAge(l, now)
+      text = `▶ ${p.done}/${p.steps.length}${left ? ` · ${left}` : ''}${age ? ` · ${age}` : ''}${agentsTxt}`
     } else if (running > 0) text = `● ${plural(running, 'agent')} running`
     else if (l.isWorking) text = `○ ${noPlanReason(l).short}`
     else if (held) text = `‖ message held · ${held.isNewTask ? 'Hand off' : 'Compact'} ★`
@@ -497,19 +536,6 @@ function planFromTodos(prev: Plan | null, todos: { content: string; status: stri
   return advancePlan(prev && prev.source === 'todos' ? prev : null, steps, 0, done, at, 'todos')
 }
 
-function advancePlan(prev: Plan | null, steps: string[], estimateMin: number, done: number, at: number, source: Plan['source']): Plan {
-  const startedAt = prev?.startedAt ?? at
-  const waitMs = prev?.waitMs ?? 0
-  const keep = Math.min(done, prev?.done ?? 0)
-  const doneAt = (prev?.doneAt ?? []).slice(0, keep)
-  const doneActive = (prev?.doneActive ?? []).slice(0, keep)
-  const activeNow = Math.max(0, at - startedAt - waitMs) / 60000
-  while (doneAt.length < done) doneAt.push(at)
-  while (doneActive.length < done) doneActive.push(activeNow)
-  const est = estimateMin > 0 ? estimateMin : prev?.estimateMin ?? 0
-  return { steps, estimateMin: est, firstEstimateMin: prev?.firstEstimateMin || est, done, startedAt, doneAt, doneActive, waitMs, source, sampled: prev?.sampled }
-}
-
 // Claude's task list as a plan. A new list after a finished one starts over.
 function planFromTasks(prev: Plan | null, at: number): Plan | null {
   return planFromTodos(prev, [...tasks.values()], at)
@@ -537,7 +563,6 @@ export const register: Register = (on, options) => {
   opts = readOpts(options)
 
   on('session.start', async ($, e, next) => {
-    sessionCwd = e.cwd
     // Each setup step on its own: one that fails is reported and never takes the others down with it.
     const failed: string[] = []
     const step = async (name: string, run: () => Promise<unknown>) => {
@@ -549,8 +574,9 @@ export const register: Register = (on, options) => {
     }
     await step('machine', async () => {
       isWindows = (await $.env.get('OS')) === 'Windows_NT' || /^[a-zA-Z]:[\\/]/.test(e.cwd)
-      home = (isWindows ? await $.env.get('USERPROFILE') : undefined) ?? (await $.env.get('HOME')) ?? ''
-      if (isWindows) home = home.replace(/\\/g, '/')
+      const home = ((isWindows ? await $.env.get('USERPROFILE') : undefined) ?? (await $.env.get('HOME')) ?? '').replace(/\\/g, '/')
+      const config = ((await $.env.get('CLAUDE_CONFIG_DIR')) ?? '').replace(/\\/g, '/') || (home ? `${home}/.claude` : '')
+      sharedDir = config ? `${config.replace(/\/+$/, '')}/workbar` : ''
       const ttl = ((await $.settings.read()) as Record<string, unknown>).promptCacheTtl
       settingsTtl = ttl === '1h' || ttl === '5m' ? ttl : ''
     })
@@ -574,7 +600,7 @@ export const register: Register = (on, options) => {
     await step('/handoff', () =>
       $.command.register({ name: 'handoff', description: 'Write a handoff from this chat, start a fresh chat and put the handoff in the prompt box' }),
     )
-    await step('/tasks', () => $.command.register({ name: 'tasks', description: 'Workbar: the task plan, agents, files changed and session health' }))
+    await step('/tasks', () => $.command.register({ name: 'tasks', description: 'Workbar: the task plan, agents and session health' }))
     if (opts.activityDir) {
       await step('activity folder', async () => {
         hasActivityDir = await $.fs
@@ -586,6 +612,7 @@ export const register: Register = (on, options) => {
     await step('refresh timer', async () => {
       $.clock.every(5000, async () => {
         await update($, tick, n => (n + 1) % 1_000_000)
+        await syncSharedLimit($).catch(() => undefined)
         await syncStatus($)
       })
     })
@@ -602,16 +629,21 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
-    if ((e as { reason?: string }).reason === 'clear') {
+    await markActivity($, 'idle', e.sessionId)
+    if (e.reason === 'clear') {
       await update($, health, () => EMPTY_HEALTH)
       await update($, live, () => EMPTY_LIVE)
       await update($, hold, () => null)
       await update($, agents, () => [])
-      await update($, files, () => [])
       await update($, asking, () => null)
       await update($, stuck, () => null)
       await update($, notice, () => null)
+      await update($, chrome, () => null)
       tasks.clear()
+      lastAdvised = 'ok'
+      errStreak = { tool: '', count: 0 }
+      permissionWaiting = false
+      lastOkAt = 0
     }
     return next(e)
   })
@@ -627,10 +659,9 @@ export const register: Register = (on, options) => {
     const l = await read($, live)
     const h = await read($, health)
     const ags = await read($, agents)
-    const fl = await read($, files)
     const now = await $.clock.now()
     const calib = await calibration($)
-    const ratios = ((await $.store.get('calib')) as number[] | undefined) ?? []
+    const ratios = ((await $.store.get(CALIB_KEY)) as number[] | undefined) ?? []
     const { Box, Text } = $.ui.resolve(e)
     const out: RenderChildren[] = []
     const head = (key: string, text: string) => (
@@ -652,7 +683,7 @@ export const register: Register = (on, options) => {
       out.push(
         head(
           'plan-h',
-          `Plan ${p.done}/${p.steps.length}  ·  ${fmtMin(activeMinutes(p, now, l.waitingSince))} of work${left ? `  ·  ${left}` : ''}${p.source === 'todos' ? '  ·  from Claude’s todo list' : ''}`,
+          `Plan ${p.done}/${p.steps.length}  ·  ${fmtMin(activeMinutes(p, now, l.waitingSince))} of work${left ? `  ·  ${left}` : ''}${reportAge(l, now) ? `  ·  ${reportAge(l, now)}` : ''}${p.source === 'todos' ? '  ·  from Claude’s todo list' : ''}`,
         ),
       )
       p.steps.forEach((s, i) => {
@@ -660,7 +691,7 @@ export const register: Register = (on, options) => {
         out.push(
           i < p.done ? (
             <Text key={`s${i}`} dimColor wrap="truncate-end">
-              ✓ {s}  {fmtDur((p.doneAt[i] ?? now) - began)}
+              ✓ {s}  {i < (p.baseDone ?? 0) ? 'before the plan' : fmtDur((p.doneAt[i] ?? now) - began)}
             </Text>
           ) : i === p.done && l.isWorking ? (
             <Text key={`s${i}`} bold wrap="truncate-end">
@@ -698,20 +729,6 @@ export const register: Register = (on, options) => {
               ({a.type}) · {plural(a.tools, 'tool')} · {fmtDur(t)}
               {a.lastAction ? ` · ${a.lastAction}` : ''}
             </Text>
-          </Text>,
-        )
-      }
-    }
-
-    if (fl.length > 0) {
-      out.push(head('f-h', `Files since your last message: ${fileSummary(fl)}`))
-      for (const f of sortFiles(fl)) {
-        out.push(
-          <Text key={`f-${f.path}`} wrap="truncate-middle">
-            <Text color={FILE_MARK[f.kind].color}>
-              {FILE_MARK[f.kind].sign} {f.kind.padEnd(8)}
-            </Text>
-            {f.path}
           </Text>,
         )
       }
@@ -808,7 +825,10 @@ export const register: Register = (on, options) => {
   // Hold a message before it goes into a chat that is too big, cold, or about something else.
   on('prompt.submit', async ($, e, next) => {
     if (e.command) {
-      if (e.command.name === 'login' && (await read($, health)).limitNoticeAt) await markLimit($, false)
+      if (e.command.name === 'login') {
+        const limited = (await read($, health)).limitNoticeAt > 0 || isSharedLimitOn(await readSharedLimit($), await $.clock.now(), lastOkAt)
+        if (limited) await markLimit($, false) // a login here counts for every chat
+      }
       return next(e)
     }
     if (e.isMeta) return next(e)
@@ -861,7 +881,6 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (!result.drop) {
       await update($, agents, list => (list.some(a => a.status !== 'running') ? list.filter(a => a.status === 'running') : list))
-      await update($, files, () => [])
       await update($, notice, () => null)
       await update($, health, x => ({
         ...x,
@@ -899,7 +918,10 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const at = await $.clock.now()
-      if ((await read($, health)).limitNoticeAt) await markLimit($, false) // logged in, or the limit reset
+      mainTurnId = e.turnId
+      // Logged in, or the limit reset: this chat tries again. If another chat's flag still stands, the
+      // request pauses and asks; if this one fails again, the notice brings Log in back.
+      if ((await read($, health)).limitNoticeAt) await markLimit($, false, 'here')
       errStreak = { tool: '', count: 0 }
       await update($, stuck, () => null)
       // An unfinished plan carries into this message ("continue", an answer to Claude's question), with
@@ -908,12 +930,34 @@ export const register: Register = (on, options) => {
         const p = l.carryPlan && l.plan ? l.plan : null
         const gap = p && l.endedAt && l.endedAt >= p.startedAt ? Math.max(0, at - l.endedAt) : 0
         const plan = p ? { ...p, carried: true, waitMs: p.waitMs + gap } : null
-        return { ...l, isWorking: true, startedAt: at, tools: 0, lastAction: '', plan, waitingSince: 0, carryPlan: false, nudged: false }
+        return { ...l, isWorking: true, startedAt: at, tools: 0, lastAction: '', plan, waitingSince: 0, carryPlan: false, nudged: false, reportedAt: 0, staleFrom: 0, staleNudges: 0 }
       })
       await markActivity($, 'busy')
       await syncStatus($)
     }
     return next(e)
+  })
+
+  // Every model request, main or subagent: paused while the account is at its usage limit (one
+  // question for all of them), and a reply that arrives is the sign this chat is through it.
+  on('turn.step', async function* ($, e, next) {
+    const sentAt = await $.clock.now()
+    if (isSharedLimitOn(await readSharedLimit($), sentAt, lastOkAt)) {
+      pausing ??= askToContinue($).finally(() => {
+        pausing = null
+      })
+      if ((await pausing) === 'stop') {
+        await $.turn.abort({ turnId: mainTurnId || e.turnId }).catch(() => undefined)
+        return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+      }
+    }
+    const r = yield* next(e)
+    if (r.stopReason !== null && sentAt > lastOkAt) {
+      lastOkAt = sentAt
+      // Through the limit: tell the other chats, which may still show Log in or wait on a question.
+      if (sharedLimit && sharedLimit.hitAt > sharedLimit.clearedAt && sharedLimit.hitAt < sentAt) await markLimit($, false)
+    }
+    return r
   })
 
   on('tool.call', { tool: PROGRESS_TOOL }, async ($, e) => {
@@ -940,8 +984,10 @@ export const register: Register = (on, options) => {
       const est = typeof args.estimate_minutes === 'number' && args.estimate_minutes > 0 ? args.estimate_minutes : 0
       const done = typeof args.done === 'number' ? Math.max(0, Math.min(steps.length, Math.floor(args.done))) : prev?.done ?? 0
       // A plan that switches from the todo list keeps its start, so elapsed time stays honest.
-      const base = prev ?? (l.plan && !isNewWork ? { ...l.plan, done: 0, doneAt: [], doneActive: [], firstEstimateMin: 0, estimateMin: 0 } : null)
-      return { ...l, plan: advancePlan(base, steps, est, done, at, 'progress') }
+      const base =
+        prev ??
+        (l.plan && !isNewWork ? { ...l.plan, done: 0, doneAt: [], doneActive: [], firstEstimateMin: 0, estimateMin: 0, baseDone: 0, estActive: 0, estDone: 0 } : null)
+      return { ...l, plan: advancePlan(base, steps, est, done, at, 'progress'), reportedAt: at, staleFrom: l.tools }
     })
     await syncStatus($)
     return { result: 'ok' }
@@ -951,7 +997,9 @@ export const register: Register = (on, options) => {
     const tool = String(e.tool)
     const any = e as unknown as Record<string, unknown>
     const agentId = (e as { agentId?: string }).agentId
-    if (tool !== PROGRESS_TOOL) {
+    // Workbar's own pause at the usage limit asks through AskUserQuestion too; it is not Claude's work.
+    const isPause = pausing !== null && tool === 'AskUserQuestion'
+    if (tool !== PROGRESS_TOOL && !isPause) {
       const target = String(any.file_path ?? any.path ?? any.command ?? any.pattern ?? any.url ?? '')
       const name = tool.replace(/^mcp__([^_]+)__/, '$1:')
       const file = target.split(/[\\/]/).pop() ?? ''
@@ -961,8 +1009,7 @@ export const register: Register = (on, options) => {
     }
     // A tool call starting means any permission prompt before it has been answered.
     if (permissionWaiting) await endWait($)
-    const ops = await filesBefore($, tool, any).catch(() => [] as FileOp[])
-    const question = agentId === undefined ? QUESTION_TOOLS[tool] : undefined
+    const question = isPause ? PAUSED : agentId === undefined ? QUESTION_TOOLS[tool] : undefined
     if (question) {
       await update($, asking, () => question)
       await beginWait($, await $.clock.now())
@@ -981,9 +1028,8 @@ export const register: Register = (on, options) => {
         await syncStatus($)
       }
     }
-    if (ops.length > 0) await filesAfter($, ops, ran.deny === undefined && !ran.isError).catch(() => undefined)
 
-    if (agentId === undefined && tool !== PROGRESS_TOOL) {
+    if (agentId === undefined && tool !== PROGRESS_TOOL && !isPause) {
       // Claude's own todo list stands in for a plan when it has not reported one.
       if (tool === 'TodoWrite' && !ran.isError && Array.isArray(any.todos)) {
         const at = await $.clock.now()
@@ -1021,9 +1067,23 @@ export const register: Register = (on, options) => {
     // A task past a quick answer with no plan on screen: ask Claude for one, once per message.
     if (agentId === undefined && tool !== PROGRESS_TOOL && !question && opts.progressTool && progressOffered !== false) {
       const l = await read($, live)
-      if (l.isWorking && !l.nudged && l.tools > QUICK_TOOLS && (!l.plan || l.plan.carried)) {
+      const p = l.plan
+      const now = await $.clock.now()
+      if (l.isWorking && !l.nudged && l.tools > QUICK_TOOLS && (!p || p.carried)) {
         await update($, live, x => ({ ...x, nudged: true }))
-        out = { ...ran, context: [...(ran.context ?? []), l.plan ? NUDGE_CARRIED_NOTE : NUDGE_NOTE] }
+        out = { ...ran, context: [...(ran.context ?? []), p ? NUDGE_CARRIED_NOTE : NUDGE_NOTE] }
+      } else if (
+        // A plan the work has run ahead of: remind Claude to report the steps it has finished.
+        l.isWorking &&
+        p?.source === 'progress' &&
+        !p.carried &&
+        p.done < p.steps.length &&
+        (l.staleNudges ?? 0) < STALE_NUDGES &&
+        l.tools - (l.staleFrom ?? 0) >= STALE_TOOLS &&
+        now - (l.reportedAt ?? now) >= STALE_MS
+      ) {
+        await update($, live, x => ({ ...x, staleFrom: x.tools, staleNudges: (x.staleNudges ?? 0) + 1 }))
+        out = { ...ran, context: [...(ran.context ?? []), staleNote(p)] }
       }
     }
 
@@ -1094,13 +1154,15 @@ export const register: Register = (on, options) => {
     await endWait($)
     const l = await read($, live)
     const seconds = Math.round((at - l.startedAt) / 1000)
-    const plan = l.plan
+    // Claude is told the last step needs no report, so a run that ends one step short has finished it.
+    const isLastOpen = !!l.plan && !e.isAborted && l.plan.source === 'progress' && !l.plan.carried && l.plan.done === l.plan.steps.length - 1
+    const plan = l.plan && isLastOpen ? advancePlan(l.plan, l.plan.steps, 0, l.plan.steps.length, at, 'progress') : l.plan
     let sampled = plan?.sampled ?? false
     if (plan && !e.isAborted && plan.source === 'progress' && !plan.sampled && !plan.carried) {
       const sample = calibrationSample(plan, activeMinutes(plan, at, 0))
       if (sample !== null) {
-        const ratios = ((await $.store.get('calib')) as number[] | undefined) ?? []
-        await $.store.set('calib', [...ratios, sample].slice(-20))
+        const ratios = ((await $.store.get(CALIB_KEY)) as number[] | undefined) ?? []
+        await $.store.set(CALIB_KEY, [...ratios, sample].slice(-20))
         sampled = true
       }
     }
@@ -1110,7 +1172,7 @@ export const register: Register = (on, options) => {
       ...x,
       isWorking: false,
       waitingSince: 0,
-      plan: x.plan ? { ...x.plan, sampled } : x.plan,
+      plan: plan ? { ...plan, sampled } : plan,
       carryPlan: carry,
       endedAt: at,
       lastRun: { seconds, estimateMin: plan?.firstEstimateMin || null, steps: plan?.steps.length ?? 0, done: plan?.done ?? 0, tools: x.tools },
@@ -1145,8 +1207,6 @@ export const register: Register = (on, options) => {
     const cx = await read($, chrome)
     const st = await read($, stuck)
     const ags = await read($, agents)
-    const fl = await read($, files)
-    const isFilesOpen = await read($, filesOpen)
     const nt = await read($, notice)
     const now = await $.clock.now()
     const { Box, Button, Text } = $.ui.resolve(e)
@@ -1165,7 +1225,7 @@ export const register: Register = (on, options) => {
 
     // While Claude works the band always shows: the plan, or one line saying why there is none.
     if (!l.isWorking) {
-      const worthIt = held || cx || limitHit || chatAlert || ags.length > 0 || fl.length > 0 || compacting || note
+      const worthIt = held || cx || limitHit || chatAlert || ags.length > 0 || compacting || note
       if (!worthIt && opts.band !== 'always') return next(e)
     }
 
@@ -1248,7 +1308,8 @@ export const register: Register = (on, options) => {
       const left = timeLeft(plan, now, await calibration($), l.waitingSince)
       const mins = minutesLeft(plan, now, await calibration($), l.waitingSince)
       const eta = mins && mins > 0 && !narrow ? ` · ≈${hhmm(new Date(now + mins * 60000))}` : ''
-      const tail = left ? `  ${left}${eta}` : ''
+      const age = narrow ? '' : reportAge(l, now)
+      const tail = `${left ? `  ${left}${eta}` : ''}${age ? ` · ${age}` : ''}`
       const barW = Math.max(6, Math.min(40, inner - 6 - tail.length))
       const filled = Math.round(pct * barW)
       add(
@@ -1364,6 +1425,22 @@ export const register: Register = (on, options) => {
     const taskOpen = lr ? lr.steps > 0 && lr.done < lr.steps : false
     const recommendHandoff = recommendsHandoff(l, held) && !taskOpen
 
+    if (limitHit && hs.limitFromOther) {
+      add(
+        8,
+        <Text key="limit-msg" color="error" wrap="truncate-end">
+          ▲ Usage limit reached in another chat. <Text dimColor>A login in any chat counts for all of them.</Text>
+        </Text>,
+      )
+    }
+    if (l.isWorking && hs.limitNoticeAt) {
+      add(
+        8,
+        <Text key="limit-msg" color="error" wrap="truncate-end">
+          ▲ Usage limit reached. <Text dimColor>This chat pauses before its next request and asks you to log in.</Text>
+        </Text>,
+      )
+    }
     if (limitHit) {
       add(
         10,
@@ -1413,27 +1490,7 @@ export const register: Register = (on, options) => {
       add(9, choices(recommendHandoff ? [handoffC, compactC] : [compactC, handoffC]))
     }
 
-    // ---- files touched: one line, opened on demand ----
-    const filesAt = rows.length
-    if (fl.length > 0) {
-      add(
-        3,
-        <Box key="files" flexDirection="row">
-          <Button
-            key="files-toggle"
-            plain
-            label={`${isFilesOpen ? '▾' : '▸'} ${plural(fl.length, 'file')}`}
-            onPress={() => update($, filesOpen, v => !v)}
-          />
-          <Text dimColor wrap="truncate-end">
-            {'  '}
-            {fileSummary(fl)}
-          </Text>
-        </Box>,
-      )
-    }
-
-    // ---- fill what is left: every step by name first, then agents, then open file paths ----
+    // ---- fill what is left: every step by name first, then agents ----
     let used = rows.reduce((s, r) => s + r.rows, 0)
     const spare = () => Math.max(0, room - used)
 
@@ -1539,36 +1596,9 @@ export const register: Register = (on, options) => {
       used += agentRows.length
     }
 
-    const fileRows: Row[] = []
-    if (fl.length > 0 && isFilesOpen) {
-      const sorted = sortFiles(fl)
-      const cap = spare()
-      const fits = sorted.length <= cap
-      for (const f of (fits ? sorted : sorted.slice(0, Math.max(0, cap - 1)))) {
-        fileRows.push({
-          prio: 1,
-          rows: 1,
-          el: (
-            <Text key={`file-${f.path}`} wrap="truncate-middle">
-              <Text color={FILE_MARK[f.kind].color}>
-                {'  '}
-                {FILE_MARK[f.kind].sign} {narrow ? '' : f.kind.padEnd(8)}
-              </Text>
-              {f.path}
-            </Text>
-          ),
-        })
-      }
-      if (!fits && cap > 0) {
-        fileRows.push({ prio: 1, rows: 1, el: <Text key="file-more" dimColor>  +{sorted.length - Math.max(0, cap - 1)} more · /tasks shows all</Text> })
-      }
-    }
-
-    // Order on screen: header or plan, warnings, agents, files, actions last (nearest the prompt).
+    // Order on screen: header or plan, warnings, agents, actions last (nearest the prompt).
     const actions = rows.filter(r => r.prio >= 9)
-    const before = rows.slice(0, filesAt).filter(r => r.prio < 9)
-    const fileLine = rows.slice(filesAt).filter(r => r.prio < 9)
-    const kept = fitRows([...before, ...agentRows, ...fileLine, ...fileRows, ...actions], room)
+    const kept = fitRows([...rows.filter(r => r.prio < 9), ...agentRows, ...actions], room)
 
     return (
       <Box flexDirection="column" borderStyle="round" borderColor={state.color} paddingX={1} width={cols}>

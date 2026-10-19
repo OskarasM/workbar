@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0 (2026-10-19)
+
+A bar that keeps up, honest time left again, and one usage limit for every chat.
+
+- Fix: time left ran short since 0.4.0. Plans that arrive a few tool calls in (as the 0.4.0 reminder makes common) came with steps already done, and those counted as finished in no time, so the pace looked several times faster than it was. They now count as done before the plan, for the time left and for calibration. Calibration starts afresh (`calib2`), as the old samples carry that error.
+- A new estimate counts from when it is given, not from the start of the plan, and the estimate weighs as one finished step against the real pace (was half), since early steps are often the quick ones.
+- A step that runs over now extends the time left instead of counting down to "under 1m" and staying there.
+- The bar keeps up: when Claude has made 6 tool calls over 90 s since its last report, one ~30-token note reminds it to report finished steps (at most 3 per message), and the band marks an old report ("report 4m old"). The tool's instructions now say the last step needs no report, and a run that ends one step short counts as finished instead of carrying into your next message.
+- Usage limit, every chat: the chat that hits the limit tells the others through a small file in your Claude config folder. Every open chat shows Log in within 5 s; a chat mid-task pauses before its next request with Continue, Log in here or Stop, and carries on by itself after a login. A login in any chat, or Continue, clears it for all. Pausing saves no tokens (the prompt cache belongs to the account); it saves a half-done step and typing "continue".
+- Fix: Claude Code's "Context limit reached" no longer reads as a usage limit.
+- Fix: the activity marker is named after the session, so a reload of the mod no longer leaves a file stuck on "busy" (which kept PowerSwitch-style sleep scripts waiting), and a session writes "idle" when it ends.
+- `/clear` now resets all of workbar's per-chat state.
+- Removed: the files-changed row and its tracking. Claude Code already shows each edit, and it saves a file check on every edit.
+
 ## 0.4.0 (2026-10-16)
 
 The band never goes quiet without saying why, and compaction is told plainly.

@@ -1,4 +1,4 @@
-// Pure helpers: formatting, time estimates, usage pace, paths and the band's row budget.
+// Pure helpers: formatting, time estimates, usage pace and the band's row budget.
 // Nothing here touches the engine, so tests can call it directly.
 import type { Plan } from '../types'
 
@@ -46,27 +46,72 @@ export function activeMinutes(p: Plan, now: number, waitingSince: number): numbe
   return Math.max(0, now - p.startedAt - p.waitMs - waiting) / 60000
 }
 
-// Before any step is done: the calibrated estimate counts down. After that, the pace of the finished
-// steps takes over, weighed against the estimate's per-step share as if it were half a finished step.
-const PRIOR_WEIGHT = 0.5
+// A plan from Claude's report, or the next state of one. Steps already finished when a plan first
+// arrives (it often comes a few tool calls in) are its `baseDone`: they took no time on this plan's
+// clock, so they never count towards its pace. An estimate is minutes from when it was given.
+export function advancePlan(prev: Plan | null, steps: string[], estimateMin: number, done: number, at: number, source: Plan['source']): Plan {
+  const startedAt = prev?.startedAt ?? at
+  const waitMs = prev?.waitMs ?? 0
+  const keep = Math.min(done, prev?.done ?? 0)
+  const doneAt = (prev?.doneAt ?? []).slice(0, keep)
+  const doneActive = (prev?.doneActive ?? []).slice(0, keep)
+  const activeNow = Math.max(0, at - startedAt - waitMs) / 60000
+  while (doneAt.length < done) doneAt.push(at)
+  while (doneActive.length < done) doneActive.push(activeNow)
+  const isNewEstimate = estimateMin > 0
+  return {
+    steps,
+    estimateMin: isNewEstimate ? estimateMin : prev?.estimateMin ?? 0,
+    firstEstimateMin: prev?.firstEstimateMin || estimateMin,
+    done,
+    startedAt,
+    doneAt,
+    doneActive,
+    waitMs,
+    source,
+    sampled: prev?.sampled,
+    baseDone: Math.min(done, prev ? prev.baseDone ?? 0 : done),
+    estActive: isNewEstimate ? activeNow : prev?.estActive ?? 0,
+    estDone: isNewEstimate ? done : prev?.estDone ?? 0,
+  }
+}
+
+// Time left on something expected to take `expected` minutes, `spent` minutes in. Once past three
+// quarters of it, expect a third as much again as has gone already: a step that runs over usually
+// has more to go, so the count never sits at "under 1m" while the work goes on.
+const OVERRUN_SHARE = 1 / 3
+const remainingOf = (expected: number, spent: number) => Math.max(expected - spent, spent * OVERRUN_SHARE, 0)
+
+// Before a step is finished on this plan's clock: the calibrated estimate counts down from when it was
+// given. After that, the pace of those steps takes over, weighed against the estimate's per-step share
+// as if it were one finished step (early steps, often reading, tend to be the quick ones).
+const PRIOR_WEIGHT = 1
 export function minutesLeft(p: Plan, now: number, calib: number, waitingSince = 0): number | null {
   const n = Math.max(1, p.steps.length)
   if (p.done >= n) return 0
   const active = activeMinutes(p, now, waitingSince)
+  const base = clamp(p.baseDone ?? 0, 0, p.done)
+  const estDone = clamp(p.estDone ?? 0, 0, n - 1)
   const prior = p.estimateMin > 0 ? p.estimateMin * calib : 0
-  if (p.done <= 0) return prior > 0 ? Math.max(prior - active, prior * 0.1) : null
-  const doneAt = clamp(p.doneActive[p.done - 1] ?? active, 0.05, Math.max(0.05, active))
-  const observed = doneAt / p.done
-  const perStep = prior > 0 ? (PRIOR_WEIGHT * (prior / n) + p.done * observed) / (PRIOR_WEIGHT + p.done) : observed
-  const onCurrent = Math.max(0, active - doneAt)
-  return Math.max(perStep - onCurrent, perStep * 0.25) + perStep * (n - p.done - 1)
+  const sinceEstimate = Math.max(0, active - (p.estActive ?? 0))
+  const ran = p.done - base
+  if (ran <= 0) return prior > 0 ? remainingOf(prior, sinceEstimate) : null
+  const firstAt = base > 0 ? p.doneActive[base - 1] ?? 0 : 0
+  const lastAt = clamp(p.doneActive[p.done - 1] ?? active, firstAt, Math.max(firstAt, active))
+  const observed = Math.max(0.05, (lastAt - firstAt) / ran)
+  const priorPerStep = prior / (n - estDone)
+  const perStep = prior > 0 ? (PRIOR_WEIGHT * priorPerStep + ran * observed) / (PRIOR_WEIGHT + ran) : observed
+  return remainingOf(perStep, Math.max(0, active - lastAt)) + perStep * (n - p.done - 1)
 }
 
 // actual/estimated for a finished (or mostly finished) plan, or null when it says nothing reliable.
+// Only the work this plan's clock saw counts: the steps left when it arrived, against its first estimate.
 export function calibrationSample(p: Plan, activeMin: number): number | null {
-  const n = p.steps.length
-  if (p.firstEstimateMin <= 0 || n === 0 || p.done < Math.ceil(n / 2) || activeMin < 0.5) return null
-  const projected = activeMin * (n / Math.max(1, p.done))
+  const base = clamp(p.baseDone ?? 0, 0, p.done)
+  const todo = p.steps.length - base
+  const ran = p.done - base
+  if (p.firstEstimateMin <= 0 || todo <= 0 || ran < Math.ceil(todo / 2) || activeMin < 0.5) return null
+  const projected = activeMin * (todo / ran)
   return clamp(projected / p.firstEstimateMin, 0.03, 20)
 }
 
@@ -129,36 +174,38 @@ export function paceFullAt(base: PaceBase | undefined, pct: number, resetsAt: st
   return Number.isFinite(reset) && at >= reset ? null : at
 }
 
-export const limitLabel = (kind: string) => (kind === 'five_hour' ? '5h' : kind === 'seven_day' ? 'week' : kind.replace(/_/g, ' '))
+// ---- a usage limit, shared by every chat on this machine ----
+// The limit is the account's, so when one chat hits it every chat is at it. One small file says so:
+// when it was hit, until when it can last at most, and when someone logged in after it.
+export type SharedLimit = { hitAt: number; until: number; clearedAt: number }
+export const LIMIT_MAX_MS = 5 * 60 * 60_000 // a 5-hour window resets by then at the latest
 
-// ---- paths ----
-export function absPath(raw: string, cwd: string, home: string, isWindows: boolean): string {
-  let s = raw.trim().replace(/^["']|["']$/g, '')
-  if (isWindows) {
-    const drive = /^\/([a-zA-Z])\/(.*)$/.exec(s) // Git Bash spelling: /c/Users/...
-    if (drive) s = `${(drive[1] ?? 'c').toUpperCase()}:/${drive[2] ?? ''}`
+export function parseSharedLimit(text: string): SharedLimit | null {
+  try {
+    const o = JSON.parse(text) as Record<string, unknown>
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+    const hitAt = num(o.hitAt)
+    return hitAt > 0 ? { hitAt, until: num(o.until) || hitAt + LIMIT_MAX_MS, clearedAt: num(o.clearedAt) } : null
+  } catch {
+    return null
   }
-  if (home && (s === '~' || s.startsWith('~/') || s.startsWith('~\\'))) s = home.replace(/[\\/]+$/, '') + s.slice(1)
-  const isAbs = /^[a-zA-Z]:[\\/]/.test(s) || s.startsWith('\\\\') || s.startsWith('/')
-  if (!isAbs && cwd) s = `${cwd.replace(/[\\/]+$/, '')}/${s}`
-  return isWindows ? s.replace(/\//g, '\\') : s
 }
 
-// Paths a shell command deletes, best effort: plain paths only, never globs or variables.
-const DELETE_CMD = /^(?:sudo\s+)?(?:rm|del|erase|rmdir|rd|ri|unlink|remove-item|git\s+rm)\b/i
-export function deleteTargets(command: string): string[] {
-  const out: string[] = []
-  for (const seg of command.split(/&&|\|\||;|\n|\|/)) {
-    const part = seg.trim()
-    if (!DELETE_CMD.test(part)) continue
-    const toks = part.match(/"[^"]*"|'[^']*'|\S+/g) ?? []
-    for (const tok of toks.slice(1)) {
-      if (tok.startsWith('-') || /^rm$/i.test(tok) || /[*?$`(){}]/.test(tok)) continue
-      out.push(tok)
-    }
-  }
-  return out.slice(0, 20)
+// Whether a chat should treat the account as at its limit: hit, not logged in or reset since, and not
+// answered for this chat since (its own successful reply after the hit says otherwise).
+export const isSharedLimitOn = (s: SharedLimit | null, now: number, lastOkAt: number) =>
+  !!s && s.hitAt > s.clearedAt && now < s.until && s.hitAt > lastOkAt
+
+// When a limit hit now ends at the latest: the earliest reset of a window that is full, else 5 hours.
+export function limitUntil(limits: { pct: number; resetsAt: string }[], now: number): number {
+  const resets = limits
+    .filter(x => x.pct >= 100)
+    .map(x => Date.parse(x.resetsAt))
+    .filter(t => Number.isFinite(t) && t > now)
+  return resets.length > 0 ? Math.min(...resets) : now + LIMIT_MAX_MS
 }
+
+export const limitLabel =(kind: string) => (kind === 'five_hour' ? '5h' : kind === 'seven_day' ? 'week' : kind.replace(/_/g, ' '))
 
 // ---- the band's height ----
 // The band shares the bottom of the screen with the prompt and with Claude Code's own dialogs. A tree

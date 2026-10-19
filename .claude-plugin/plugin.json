@@ -1,7 +1,7 @@
 {
   "name": "workbar",
-  "version": "0.4.0",
-  "description": "Shows how far along Claude is and when it will really be done, what it is waiting on, what it changed, and when a chat is getting too big or going cold. Small, close to zero tokens, terminal and desktop app.",
+  "version": "0.5.0",
+  "description": "Shows how far along Claude is and when it will really be done, what it is waiting on, and when a chat is getting too big or going cold. Small, close to zero tokens, terminal and desktop app.",
   "author": {
     "name": "OskarasM",
     "url": "https://github.com/OskarasM"
@@ -34,7 +34,7 @@
     "progressTool": {
       "type": "boolean",
       "title": "Ask Claude for a progress plan",
-      "description": "On: Claude reports steps and an estimate through a tiny tool (about 150 cached tokens per request, a few dozen per task), and a message that runs past 3 tool calls with no plan gets one ~35-token reminder. Off: no tokens at all; the bar then follows Claude’s own todo or task list when it keeps one.",
+      "description": "On: Claude reports steps and an estimate through a tiny tool (about 150 cached tokens per request, a few dozen per task), a message that runs past 3 tool calls with no plan gets one ~35-token reminder, and a plan that falls behind the work gets a ~30-token reminder to report (at most 3 per message). Off: no tokens at all; the bar then follows Claude’s own todo or task list when it keeps one.",
       "default": true
     },
     "holdMessages": {

@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-import { bandBudget, calibrationFrom, fitRows, minutesLeft } from './lib'
+import { advancePlan, bandBudget, calibrationFrom, calibrationSample, fitRows, isSharedLimitOn, limitUntil, minutesLeft, parseSharedLimit } from './lib'
 import type { Plan } from '../types'
 
 const BAND = {
@@ -50,10 +50,11 @@ test('time left follows the pace of finished steps, not only the first estimate'
     waitMs: 0,
     source: 'progress',
   }
-  // two steps in 2 minutes: about 1 minute per step is left for each of the last two, give or take the prior
+  // two steps in 2 minutes against an estimate of 10 a step, which counts as one more finished step:
+  // about 4 minutes a step for the last two, far under the estimate's 20
   const left = minutesLeft(p, 120_000, 1, 0)!
-  expect(left).toBeGreaterThan(1.5)
-  expect(left).toBeLessThan(6)
+  expect(left).toBeGreaterThan(6)
+  expect(left).toBeLessThan(10)
 })
 
 test('the band never asks for more rows than a third of the screen, or 12', async () => {
@@ -414,46 +415,6 @@ test('at a usage limit the band offers only Log in, without repeating the limit'
   expect(await ui.find({ key: 'compact' })).toBeUndefined()
 })
 
-test('files Claude adds, changes and deletes show as one line that opens to full paths', async ($, on) => {
-  engine(on)
-  on('env.get', (_$, e) => ({ value: (e as { name: string }).name === 'OS' ? 'Windows_NT' : undefined }) as never)
-  on('session.start', (_$, e) => ({ cwd: (e as { cwd: string }).cwd }) as never)
-  on('settings.read', () => ({ value: {} }) as never)
-  on('clock.every', () => ({ value: undefined }) as never)
-  on('ui.log', () => ({ value: undefined }) as never)
-  on('tool.register', () => ({ value: undefined }) as never)
-  on('command.register', () => ({ value: undefined }) as never)
-  const win = (p: string) => p.split('/').join(String.fromCharCode(92)) // the band shows Windows paths
-  const onDisk = new Set([win('C:/proj/src/old.ts'), win('C:/proj/src/app.ts')])
-  on('fs.stat', (_$, e) => {
-    // On macOS and Linux the engine resolves a C:\ path against the real working folder first: match the end.
-    const asked = (e as { path: string }).path
-    if (![...onDisk].some(p => asked.endsWith(p))) throw new Error('ENOENT')
-    return { value: { kind: 'file', size: 1, isLink: false } } as never
-  })
-  on('tool.call', (_$, e) => {
-    const a = e as unknown as { tool: string; file_path?: string }
-    if (a.tool === 'Write' && a.file_path) onDisk.add(win(a.file_path))
-    if (a.tool === 'Bash') onDisk.delete(win('C:/proj/src/old.ts'))
-    return { result: 'ok' } as never
-  })
-  on('turn.complete', (_$, e) => ({ text: e.answer }))
-  await $.session.start({ cwd: 'C:/proj', surface: 'terminal', isInteractive: true } as never)
-  await $.turn.start({ text: 'refactor', turnId: 't11' })
-  await $.tool.call({ tool: 'Write', file_path: 'C:/proj/src/new.ts', content: 'x' } as never)
-  await $.tool.call({ tool: 'Edit', file_path: win('C:/proj/src/app.ts'), old_string: 'a', new_string: 'b' } as never)
-  await $.tool.call({ tool: 'Bash', command: 'rm -f "C:/proj/src/old.ts" && echo done' } as never)
-  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't11', reason: 'answer' } as never)
-  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
-  expect(await ui.find({ text: /3 files/ })).toBeDefined()
-  expect(await ui.find({ text: /1 changed · 1 added · 1 removed/ })).toBeDefined()
-  expect(await ui.find({ text: win('C:/proj/src/new.ts') })).toBeUndefined()
-  await ui.press({ key: 'files-toggle' })
-  expect(await ui.find({ text: /\+ added/ })).toBeDefined()
-  expect(await ui.find({ text: win('C:/proj/src/new.ts') })).toBeDefined()
-  expect(await ui.find({ text: /− removed/ })).toBeDefined()
-})
-
 test('the status line mirrors progress, and shows when Claude is asking you something', async ($, on) => {
   engine(on)
   const status: (string | undefined)[] = []
@@ -666,4 +627,220 @@ test('a new chat in always mode shows the band from the start and says what it i
   const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
   expect(await ui.find({ text: /READY/ })).toBeDefined()
   expect(await ui.find({ text: /New chat · a progress bar shows when Claude works through several steps/ })).toBeDefined()
+})
+
+// ---- 0.5.0: honest time left, a bar that keeps up, one usage limit for every chat ----
+
+test('a plan sent a few tool calls in, with steps already done, keeps a sensible time left', async () => {
+  // Claude reports 2 of 4 steps done as the plan arrives, then finishes the third 3 minutes later
+  const p = advancePlan(null, ['Read', 'Fix', 'Test', 'Docs'], 10, 2, 0, 'progress')
+  const later = advancePlan(p, p.steps, 0, 3, 3 * 60_000, 'progress')
+  // a pace of 3 min a step against the estimate's 5: about 4 minutes left, not the 1 minute that
+  // counting the two early steps as instant used to give
+  const left = minutesLeft(later, 3 * 60_000, 1)!
+  expect(left).toBeGreaterThan(3)
+  expect(left).toBeLessThan(6)
+  // calibration compares only the work this plan saw: the last 2 steps took 6 minutes of the 10 estimated
+  expect(Math.abs(calibrationSample({ ...later, done: 4, doneActive: [0, 0, 3, 6] }, 6)! - 0.6)).toBeLessThan(0.001)
+})
+
+test('a new estimate counts from when it is given, and an overrun never shows under a minute', async () => {
+  const first = advancePlan(null, ['A', 'B', 'C'], 10, 0, 0, 'progress')
+  // 8 minutes in, Claude re-plans: 6 more minutes
+  const replanned = advancePlan(first, ['A', 'B', 'C', 'D'], 6, 0, 8 * 60_000, 'progress')
+  expect(Math.abs(minutesLeft(replanned, 8 * 60_000, 1)! - 6)).toBeLessThan(0.001)
+  // 10 minutes into a 4-minute estimate with nothing reported: still a few minutes, not "under 1m"
+  const slow = advancePlan(null, ['A', 'B'], 4, 0, 0, 'progress')
+  expect(minutesLeft(slow, 10 * 60_000, 1)!).toBeGreaterThan(3)
+})
+
+test('the shared usage-limit flag holds until a login or its reset', async () => {
+  expect(parseSharedLimit('not json')).toBeNull()
+  const s = parseSharedLimit(JSON.stringify({ hitAt: 1000 }))!
+  expect(s.until).toBe(1000 + 5 * 60 * 60_000)
+  expect(isSharedLimitOn(s, 2000, 0)).toBe(true)
+  expect(isSharedLimitOn({ ...s, clearedAt: 1500 }, 2000, 0)).toBe(false) // logged in since
+  expect(isSharedLimitOn(s, 2000, 1500)).toBe(false) // this chat got a reply since
+  expect(isSharedLimitOn(s, s.until, 0)).toBe(false) // the window has reset
+  const reset = Date.parse('2030-01-01T10:00:00Z')
+  expect(limitUntil([{ pct: 100, resetsAt: '2030-01-01T10:00:00Z' }, { pct: 40, resetsAt: '2030-01-01T09:00:00Z' }], reset - 1000)).toBe(reset)
+})
+
+test('a plan the work has run ahead of gets a short reminder to report finished steps', async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: 'done' }) as never)
+  await $.turn.start({ text: 'build', turnId: 'st1' })
+  await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['Read', 'Fix', 'Test'], estimate_minutes: 10 } as never)
+  const notes: string[] = []
+  const work = async (n: number) => {
+    for (let i = 0; i < n; i++) {
+      now += 20_000
+      const r = await $.tool.call({ tool: 'Read', file_path: `C:/x/${notes.length}.cs` } as never)
+      notes.push(String((r as { context?: string[] }).context ?? ''))
+    }
+  }
+  await work(6) // 6 calls and 2 minutes with no report
+  expect(notes.slice(0, 5).join('')).toBe('')
+  expect(notes[5]).toMatch(/step 1\/3 "Read".*`done`/)
+  await work(5)
+  expect(notes.slice(6).join('')).toBe('') // one reminder, then quiet for a while
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
+  expect(await ui.find({ text: /report 3m old/ })).toBeDefined()
+  await $.tool.call({ tool: 'mcp__workbar__progress', done: 1 } as never)
+  expect(await ui.find({ text: /report \d+m old/ })).toBeUndefined()
+  await work(18)
+  expect(notes.filter(Boolean)).toHaveLength(3) // at most 3 per message
+})
+
+test('a run that ends one step short has finished its plan: not carried, and counted for calibration', async ($, on) => {
+  engine(on)
+  const saved: string[] = []
+  on('store.set', (_$, e) => {
+    saved.push(JSON.stringify(e))
+    return { value: undefined } as never
+  })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  await $.turn.start({ text: 'build', turnId: 'f1' })
+  await $.tool.call({ tool: 'mcp__workbar__progress', steps: ['A', 'B', 'C'], estimate_minutes: 6 } as never)
+  now += 2 * 60_000
+  await $.tool.call({ tool: 'mcp__workbar__progress', done: 2 } as never)
+  now += 60_000
+  await $.turn.complete({ answer: 'All done.', durationMs: 1000, isAborted: false, turnId: 'f1', reason: 'answer' } as never)
+  expect(saved).toEqual([JSON.stringify({ value: [0.5], key: 'calib2' })])
+  await $.turn.start({ text: 'thanks', turnId: 'f2' })
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: BAND } as never)
+  expect(await ui.find({ text: /plan from your last message/ })).toBeUndefined()
+  expect(await ui.find({ text: /Thinking/ })).toBeDefined()
+})
+
+// A machine with the shared limit flag in memory, and the engine's own band beneath workbar's.
+// On Windows the engine hands paths on with its own separators and drive: compare them in one spelling.
+const unix = (p: string) => p.split(String.fromCharCode(92)).join('/').replace(/^[A-Za-z]:/, '')
+const machine = (on: On, flag: { text?: string }, options: { dir?: string } = {}) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('session.start', (_$, e) => ({ cwd: (e as { cwd: string }).cwd }) as never)
+  on('settings.read', () => ({ value: {} }) as never)
+  on('ui.log', () => ({ value: undefined }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.notify', () => ({ value: { isSent: true, channel: 'desktop' } }) as never)
+  on('tool.register', () => ({ value: undefined }) as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.id', () => ({ value: 'sess-a' }) as never)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return (<Text>engine band</Text>) as never
+  })
+  const writes: { path: string; text: string }[] = []
+  // A hook that throws is set aside for the rest of a test, so a missing file reads as empty here.
+  on('fs.read', (_$, e) => ({ value: unix((e as { path: string }).path).endsWith('workbar/limit.json') ? flag.text ?? '' : '' }) as never)
+  on('fs.write', (_$, e) => {
+    const w = { path: unix((e as { path: string }).path), text: (e as { text: string }).text }
+    writes.push(w)
+    if (w.path.endsWith('workbar/limit.json')) flag.text = w.text
+    return { value: undefined } as never
+  })
+  on('fs.stat', (_$, e) => ({ value: { kind: unix((e as { path: string }).path) === options.dir ? 'dir' : 'file', size: 0, isLink: false } }) as never)
+  return { clock, writes }
+}
+const hitAt = (at: number, clearedAt = 0) => JSON.stringify({ hitAt: at, until: at + 3_600_000, clearedAt })
+
+test('a usage limit hit in another chat brings up Log in here too, and a login there clears it', async ($, on) => {
+  const flag: { text?: string } = {}
+  const { clock } = machine(on, flag)
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true } as never)
+  const ui = await $.ui.mount({ plugin: 'workbar', surface: 'terminal', component: 'AbovePrompt', props: idle() } as never)
+  expect(await ui.find({ text: /engine band/ })).toBeDefined()
+  flag.text = hitAt(clock.now())
+  await clock.advance(5000)
+  expect(await ui.find({ key: 'login' })).toBeDefined()
+  expect(await ui.find({ text: /Usage limit reached in another chat/ })).toBeDefined()
+  flag.text = hitAt(clock.now() - 5000, clock.now())
+  await clock.advance(5000)
+  expect(await ui.find({ key: 'login' })).toBeUndefined()
+})
+
+test('the chat that hits the limit tells every chat, and /login tells them it is over', async ($, on) => {
+  const flag: { text?: string } = {}
+  const { clock } = machine(on, flag)
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true } as never)
+  await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: 'Context limit reached · /compact or /clear to continue' }] } } as never)
+  expect(flag.text).toBeUndefined() // about this chat alone
+  await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: 'Usage limit reached · resets 8pm' }] } } as never)
+  expect(JSON.parse(flag.text!)).toMatchObject({ hitAt: clock.now(), clearedAt: 0 })
+  await clock.advance(60_000)
+  await $.prompt.submit({ text: '/login', command: { name: 'login', args: '' } } as never)
+  expect(JSON.parse(flag.text!).clearedAt).toBe(clock.now())
+})
+
+type StepResult = { answer: string; stopReason: unknown }
+const step = async ($: { turn: { step: (e: never) => AsyncGenerator<unknown, unknown> } }, turnId: string): Promise<StepResult> => {
+  const it = $.turn.step({ turnId, index: 0, model: 'm', messageCount: 3 } as never)
+  for (;;) {
+    const r = await it.next()
+    if (r.done) return r.value as StepResult
+  }
+}
+const answering = (on: On, pick: string, sent: { n: number; asked: number }) => {
+  on('tool.call', (_$, e) => {
+    const a = e as unknown as { tool: string; questions?: { question: string }[] }
+    if (a.tool !== 'AskUserQuestion') return { result: 'ok' } as never
+    sent.asked++
+    return { result: { questions: a.questions, answers: { [a.questions?.[0]?.question ?? '']: pick } } } as never
+  })
+  on('turn.step', async function* (_$, e) {
+    sent.n++
+    return { turnId: e.turnId, index: e.index, answer: 'hi', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  })
+}
+
+test('a request in a chat at the limit waits for you, then carries on by itself', async ($, on) => {
+  const flag: { text?: string } = {}
+  const { clock } = machine(on, flag)
+  const sent = { n: 0, asked: 0 }
+  answering(on, 'Continue', sent)
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'go on', turnId: 'p1' })
+  expect((await step($ as never, 'p1')).answer).toBe('hi') // no limit: straight through
+  expect(sent).toEqual({ n: 1, asked: 0 })
+  await clock.advance(1000)
+  flag.text = hitAt(clock.now())
+  await clock.advance(1000)
+  expect((await step($ as never, 'p1')).answer).toBe('hi')
+  expect(sent).toEqual({ n: 2, asked: 1 })
+  expect(JSON.parse(flag.text).clearedAt).toBe(clock.now()) // Continue lets the other chats go on too
+})
+
+test('Stop at the limit ends the turn without sending the request', async ($, on) => {
+  const flag: { text?: string } = {}
+  const { clock } = machine(on, flag)
+  const sent = { n: 0, asked: 0 }
+  answering(on, 'Stop', sent)
+  let aborted = ''
+  on('turn.abort', (_$, e) => {
+    aborted = (e as { turnId: string }).turnId
+    return { value: undefined } as never
+  })
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true } as never)
+  flag.text = hitAt(clock.now())
+  await clock.advance(1000)
+  await $.turn.start({ text: 'go on', turnId: 'p2' })
+  expect((await step($ as never, 'p2')).stopReason).toBeNull()
+  expect(sent).toEqual({ n: 0, asked: 1 })
+  expect(aborted).toBe('p2')
+})
+
+test('the activity marker is named after the session, so a reload never leaves a busy file behind', { options: { activityDir: '/act' } }, async ($, on) => {
+  const { writes } = machine(on, {}, { dir: '/act' })
+  on('session.end', (_$, e) => ({ sessionId: (e as { sessionId: string }).sessionId }) as never)
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true } as never)
+  await $.turn.start({ text: 'go', turnId: 'm1' })
+  await $.session.end({ reason: 'other', sessionId: 'sess-a', resume: {} } as never)
+  const marks = writes.filter(w => w.path.startsWith('/act'))
+  expect(marks.map(w => w.path)).toEqual(['/act/sess-a.txt', '/act/sess-a.txt'])
+  expect(marks.map(w => w.text.split(' ')[0])).toEqual(['busy', 'idle'])
 })
