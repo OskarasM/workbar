@@ -23,7 +23,7 @@
     "band": {
       "type": "string",
       "title": "Band above the prompt",
-      "description": "auto: while Claude works the band always shows the plan, or why there is none; between tasks it shows only when there is something to see or do (agents, files changed, a warning), and the chat size lives in the status line. always: also show the chat-size gauge between tasks and in a new chat. off: status line only.",
+      "description": "auto: while Claude works the band always shows the plan, or why there is none; between tasks it shows only when there is something to see or do (agents, a warning, an action), and the chat size lives in the status line. always: also show the chat-size gauge between tasks and in a new chat. off: status line only.",
       "default": "auto",
       "options": [
         "auto",

@@ -1,6 +1,17 @@
+<div align="center">
+
 # workbar
 
-A small Claude Code mod that shows what a session is doing and what it needs from you, without spending your tokens on it.
+**See how far along Claude Code is, when it will really be done, and what it needs from you.**
+
+A small mod for Claude Code that adds one band above the prompt. It costs close to zero tokens.
+
+[![checks](https://github.com/OskarasM/workbar/actions/workflows/ci.yml/badge.svg)](https://github.com/OskarasM/workbar/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/OskarasM/workbar)](https://github.com/OskarasM/workbar/releases)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Claude Code 2.1.287+](https://img.shields.io/badge/Claude%20Code-2.1.287%2B-d97757)
+
+</div>
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -10,7 +21,26 @@ A small Claude Code mod that shows what a session is doing and what it needs fro
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-Between tasks the same band turns into a short health check, and offers an action when one is worth taking:
+```
+/plugin install workbar --marketplace OskarasM/workbar
+```
+
+## Why you'd want it
+
+Claude Code does the work well, but it tells you little about the session around the work. You end up guessing:
+
+- **"Is it nearly done, or should I go make coffee?"** workbar shows the plan, each step as it finishes, and a time left that learns how fast Claude really works on your machine, not how long a person would take.
+- **"Why has it gone quiet?"** The band says what it is waiting on: an agent, a question, your approval, a login. You get a desktop alert when Claude needs you, or when a long run finishes, so you can step away.
+- **"Why is this chat getting slow and expensive?"** A gauge shows how big the chat is and when the prompt cache goes cold. When it is worth acting, one button compacts the chat or hands the work to a fresh one.
+- **"I hit my usage limit in one chat. What about the other five?"** Every open chat shows **Log in** within seconds. Chats in the middle of a task pause cleanly and carry on by themselves after you log in.
+
+It does all this from what Claude Code already knows, so your bill barely notices it.
+
+## What it looks like
+
+**While Claude works:** a progress bar with every step named, time left and a finish time, plus one row per subagent.
+
+**Between tasks:** a short health check that offers an action only when one is worth taking.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -20,74 +50,55 @@ Between tasks the same band turns into a short health check, and offers an actio
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## Why workbar
+★ marks the action that fits. Hand off writes a summary, starts a fresh chat and puts the summary in the prompt box. Compact shrinks the chat in place.
 
-Claude Code is good at the work. It says little about the session around the work. workbar covers those gaps and nothing more:
+## Features
 
-- How far along is it, and when will it really be done?
-- What is it waiting on: an agent, a question, your approval, a login?
-- Is this chat getting too big or going cold, and what should you do about it?
-
-What it holds to:
-
-- **Small.** One band above the prompt, one status-line entry, two commands. No dashboards, no themes.
-- **Close to zero tokens.** Everything it shows comes from what Claude Code already knows. It never calls a model unless you press a button, or turn on the optional new-task check.
-- **Out of the way, never a mystery.** While Claude works it shows the plan, or one line saying why there is none. Between tasks it appears when it has something to say. It steps aside for Claude Code's own dialogs.
-- **Terminal and desktop app alike.**
-
-## What it does
-
-| Feature | What you get |
+| | What you get |
 |---|---|
-| Progress bar | Steps, % done, time left and a finish time, for any task of more than a few steps. Every step is named whenever the band has room; finished agents give way first. When Claude's last report is a few minutes old with work going on since, the bar says so ("report 4m old") and Claude gets a short reminder. An unfinished plan carries into your next message ("continue", an answer to Claude's question). |
-| Never a silent band | While Claude works with no plan, the band says why: thinking, a quick task that needs none, no plan from Claude yet, plans turned off, or the progress tool not loaded (with the fix). |
-| Honest estimates | Models estimate how long a *person* would take. workbar learns from your finished tasks how long Claude really takes (median of the last 20), leaves out time spent waiting on you (questions, plan approval, permission prompts), and blends in the real pace once steps finish. Steps already done when the plan arrives are not mistaken for instant ones, and a step that runs over extends the time left instead of sitting at "under 1m". |
-| Subagents | One row per agent: its task, tools used, time, current action and its own step count. Lots of agents collapse into a summary row. |
-| Usage limit, every chat | When one chat hits the usage limit, every open chat shows **Log in** within a few seconds, and a chat in the middle of a task pauses before its next request with Continue / Log in here / Stop, then carries on by itself once you have logged in anywhere. |
-| Chat health | Chat size gauge, prompt-cache countdown, usage windows past 50% with a "full at this pace" time. |
-| Compact or Hand off | When the chat is big or the cache has gone cold: one press compacts in place (same task) or writes a handoff, clears, and puts it in the prompt box (new task). ★ marks the one that fits. A running compaction shows with its time, the result stays in the band for a few minutes, and a compact that cannot run says why. |
-| Message hold | A message into a huge or cold chat is held once with those two options; Enter again sends it anyway. |
-| Loop warning | Three failed tool calls in a row: a warning that Claude may be going in circles. |
-| Alerts | A pop-up when Claude needs approval, has waited 15 s on a question, or finishes a run of 2 minutes or more. |
-| Chrome reconnect | When the Claude in Chrome extension drops, it shows how to reconnect and tells Claude to wait rather than give up on the browser step. |
-| Status line | The one thing that matters right now, mirrored into Claude Code's status line, so it shows even with the band folded. |
+| **Progress bar** | Steps, % done, time left and a finish time for any task of more than a few steps. When Claude's last report is a few minutes old, the bar says so ("report 4m old") rather than pretending. An unfinished plan carries into your next message. |
+| **Honest estimates** | Models guess how long a *person* would take, about 3x too long in the author's own history. workbar learns from your finished tasks how long Claude really takes (median of the last 20), leaves out time spent waiting on you, and blends in the real pace as steps finish. |
+| **Never a blank band** | With no progress bar showing, the band says why: thinking, a quick task, no plan yet, or the progress tool not loaded (with the fix). |
+| **Subagents** | One row per agent: its task, tools used, time and current action. Lots of agents collapse into a summary row. |
+| **Chat health** | Chat size, a prompt-cache countdown, and usage windows past 50% with the time they fill at this pace. |
+| **Compact or Hand off** | One press, when the chat is big or the cache has gone cold. A running compaction shows its time, and one that cannot run says why. |
+| **Message hold** | A message into a huge or cold chat is held once with those two options. Press Enter again to send it anyway. |
+| **Usage limit, every chat** | The chat that hits the limit tells all the others on this machine. A chat mid-task pauses with Continue / Log in here / Stop. |
+| **Alerts** | A pop-up when Claude needs approval, has waited 15 s on a question, or finishes a run of 2 minutes or more. |
+| **Loop warning** | Three failed tool calls in a row warn you that Claude may be going in circles. |
+| **Chrome reconnect** | When the Claude in Chrome extension drops, workbar shows how to reconnect and tells Claude to wait instead of giving up on the browser step. |
+| **Status line** | The one thing that matters right now, mirrored into Claude Code's status line. |
 
-`/tasks` opens a pane with everything in full: every step with its time, every agent, the session's cost and limits, and how estimates are being scaled. `/handoff` writes a handoff and starts a fresh chat with it.
+Two commands: `/workbar` opens a pane with everything in full (every step with its time, every agent, the session's cost and limits, and how estimates are scaled). `/handoff` writes a handoff and starts a fresh chat with it.
 
-## Token cost
+## Costs almost nothing
+
+workbar reads what Claude Code already reports. It never calls a model on its own, unless you press a button or turn on the optional new-task check.
 
 | Part | Cost |
 |---|---|
-| The `progress` tool | Its description and schema are about 150 tokens, part of the cached tool list (read at a tenth of the price after the first request). |
-| Progress reports | A few dozen output tokens per report, sent alongside a tool call Claude was making anyway, so no extra round trips. Roughly 200 tokens for a typical task. |
-| Plan reminder | Claude often skips the plan on medium-sized work. Once a message has taken more than 3 tool calls with no plan, one note of about 35 tokens asks for one, at most once per message. Quick answers never get it. |
-| Progress reminder | When the plan falls behind (6 tool calls and 90 s with no report), one note of about 30 tokens reminds Claude to report finished steps; at most 3 per message. |
-| A message typed mid-task | About 30 tokens of context asking Claude to update the plan. |
-| Everything else | Drawn locally from what Claude Code already reports. No model calls. |
-| New-task check (off by default) | A free local word check first; only a message that shares almost no words with your recent ones goes to Haiku, as a note of about 150 tokens (never the chat). At list prices that is roughly a thousandth of one normal message in a 100k chat. |
-| Hand off (only when you press it) | One question over the transcript. With the cache warm it is read at the cached price, about a tenth of normal; with the cache cold it costs what any message into that chat would. Press it while the cache countdown is still running. |
+| The `progress` tool | About 180 tokens of description and schema. They sit in the cached tool list, so after the first request they're read at a tenth of the price. |
+| Progress reports | A few dozen output tokens each, sent alongside a tool call Claude was making anyway, so no extra round trips. Roughly 200 tokens for a typical task, and none for a quick answer. |
+| Plan reminder | Once a message has taken more than 3 tool calls with no plan, one note of about 40 tokens asks for one. At most once per message. |
+| Progress reminder | When the plan falls behind (6 tool calls and 90 s with no report), one note of about 40 tokens. At most 3 per message. |
+| A message typed mid-task | About 30 tokens asking Claude to update the plan. |
+| Everything else | Drawn locally. No model calls. |
+| New-task check (off by default) | A free local word check first. Only a message that shares almost no words with your recent ones goes to Haiku, as a note of about 150 tokens. |
+| Hand off (only when you press it) | One question over the transcript, at the cached price while the cache is warm. |
 
-Want zero? Turn off **Ask Claude for a progress plan**: the bar then follows Claude's own todo list when it keeps one, and nothing at all is added to your requests.
+**Want zero?** Turn off **Ask Claude for a progress plan**. The bar then follows Claude's own todo list when it keeps one, and nothing at all is added to your requests.
 
 ## Install
 
-Needs a Claude Code version with mods (2.1.287 or newer). Tested on 2.1.301, Windows 11.
+Needs Claude Code 2.1.287 or newer (with mods). Tested on 2.1.301.
 
-In a Claude Code session:
+| Where | How |
+|---|---|
+| In a Claude Code session | `/plugin install workbar --marketplace OskarasM/workbar` |
+| From a shell | `claude plugin install workbar --marketplace OskarasM/workbar` |
+| Desktop app | Click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `OskarasM/workbar`, then **Add plugin**. |
 
-```
-/plugin install workbar --marketplace OskarasM/workbar
-```
-
-From a shell:
-
-```
-claude plugin install workbar --marketplace OskarasM/workbar
-```
-
-In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `OskarasM/workbar`, then **Add plugin**.
-
-Update with `claude plugin marketplace update workbar` then `claude plugin update workbar`, or remove with `claude plugin uninstall workbar`.
+To update: `claude plugin marketplace update workbar`, then `claude plugin update workbar`. To remove: `claude plugin uninstall workbar`.
 
 ## Settings
 
@@ -95,30 +106,37 @@ All in `/config` under **workbar**.
 
 | Setting | Default | |
 |---|---|---|
-| Band above the prompt | `auto` | `auto` shows the band when there is something to see or do and keeps the chat size in the status line otherwise; `always` keeps the chat gauge up between tasks too; `off` uses the status line only. |
-| Ask Claude for a progress plan | on | Off: zero tokens, the bar follows Claude's todo list. |
+| Band above the prompt | `auto` | `auto` shows the band when there is something to see or do, and keeps the chat size in the status line otherwise. `always` also keeps the chat gauge up between tasks. `off` uses the status line only. |
+| Ask Claude for a progress plan | on | Off: zero tokens, and the bar follows Claude's todo list. |
 | Hold a message into an oversized or cold chat | on | |
-| Spot a new task in a long chat | off | See Token cost. |
+| Spot a new task in a long chat | off | See [Costs almost nothing](#costs-almost-nothing). |
 | Chat size: warn at | 150k | Amber from here, red at twice this. |
-| Desktop alerts | on | Claude Code's own notifications (the desktop app, terminals that have them). On Windows Terminal, which has none Claude Code can use, a Windows toast instead. |
-| Activity marker folder | empty | Each session writes `busy <ms>` / `idle <ms>` to `<folder>/<session id>.txt`, and `idle` when it ends, for your own scripts (sleep the machine when Claude is done, light a lamp...). |
+| Desktop alerts | on | Claude Code's own notifications where it has them. On Windows Terminal, a Windows toast instead. |
+| Activity marker folder | empty | Each session writes `busy <ms>` / `idle <ms>` to `<folder>/<session id>.txt`, for your own scripts: sleep the machine when Claude is done, light a lamp, and so on. |
 
 The prompt cache lifetime is detected: 1 hour on a Claude subscription, 5 minutes on an API key, or your `promptCacheTtl` setting.
 
-## How the band stays on screen
-
-The band shares the bottom of the terminal with the prompt and Claude Code's own dialogs. Anything taller than its room scrolls in a small window, and on the main (non-fullscreen) screen a tall bottom area breaks the redraw. So workbar fits a fixed budget: at most a third of the terminal's height and never more than 12 rows, borders included. Every line truncates rather than wraps. The step list comes first: every step by name, with names shortened before anything folds. When the room still runs short, the actions stay and the details give way: done agents first, and last the step list, which folds into one line naming the current step and as many of the next ones as fit. While Claude shows a question or a plan for approval, the band steps aside completely and the status line says what is waiting.
-
 ## Known limitations
 
-- The band is shared: only one mod draws above the prompt at a time. In `auto` mode workbar steps aside when there is nothing to show, so other mods' bands get their turn.
-- Pausing at the usage limit saves no tokens: the prompt cache belongs to the account, so after switching accounts each chat's next request re-sends its context once, paused or not. What the pause saves is a half-done step and typing "continue".
-- The usage-limit flag is shared through a small file, `workbar/limit.json` in your Claude config folder, so it reaches the chats on this machine only.
-- The progress bar needs Claude to report a plan (or keep a todo or task list). Quick answers get none, on purpose, and the band says so.
-- The band is drawn in the terminal and the desktop app only; Claude Code does not offer it in VS Code, on the web or on mobile. There, `/tasks` and the status line still work.
-- Claude Code's `[-]` (or ctrl+x ctrl+a) collapses the band, and a mod cannot tell. If the band seems gone, press `[-]` again.
-- In organizations that manage Claude Code, a user-installed mod's `Notification` and `StopFailure` hooks do not run, so approval alerts are skipped there (the usage-limit Log in button still follows Claude Code's notice).
-- The band is tested on the terminal and desktop surfaces in Claude Code's test kit, and used daily on Windows 11 with Windows Terminal. The `/tasks` pane in the desktop app, and macOS and Linux, are less tried.
+- Only one mod can draw above the prompt at a time. In `auto` mode workbar steps aside when it has nothing to show, so other mods get their turn.
+- The progress bar needs Claude to report a plan or keep a todo list. Quick answers get none on purpose, and the band says so.
+- The band shows in the terminal and the desktop app. Claude Code doesn't offer it in VS Code, on the web or on mobile; there, `/workbar` and the status line still work.
+- Pausing at the usage limit saves no tokens, because the prompt cache belongs to the account. It saves a half-done step and typing "continue".
+- The usage-limit flag is shared through `workbar/limit.json` in your Claude config folder, so it reaches chats on this machine only.
+- Claude Code's `[-]` (or ctrl+x ctrl+a) collapses the band, and a mod can't tell. If the band seems gone, press `[-]` again.
+- Where an organization manages Claude Code, a user-installed mod's `Notification` and `StopFailure` hooks don't run, so approval alerts are skipped there.
+- Used daily on Windows 11 with Windows Terminal, and tested on all three operating systems in CI. The `/workbar` pane in the desktop app, and day-to-day use on macOS and Linux, have had less real-world testing. Issues are welcome.
+
+<details>
+<summary><b>How the band stays on screen</b></summary>
+
+<br>
+
+The band shares the bottom of the terminal with the prompt and Claude Code's own dialogs. Anything taller than its room scrolls in a small window, and on the main (non-fullscreen) screen a tall bottom area breaks the redraw. So workbar fits a fixed budget: at most a third of the terminal's height and never more than 12 rows, borders included. Every line truncates rather than wraps.
+
+The step list comes first, every step by name, with names shortened before anything folds. When room runs short, the actions stay and the details give way: finished agents first, and last the step list, which folds into one line naming the current step and as many of the next ones as fit. While Claude shows a question or a plan for approval, the band steps aside completely and the status line says what is waiting.
+
+</details>
 
 ## Compared with
 
@@ -130,11 +148,11 @@ The band shares the bottom of the terminal with the prompt and Claude Code's own
 | Acts for you (compact, hand off, hold) | yes | no | holds a cold send, keeps the cache warm |
 | Alerts | yes | no | no |
 
-They overlap. If you already use claude-hud's status line, set workbar's band to `auto` and they sit fine together. If you use cache-tax, turn off workbar's message hold so a cold send is not held twice.
+They overlap. If you already use claude-hud's status line, set workbar's band to `auto` and they sit fine together. If you use cache-tax, turn off workbar's message hold so a cold send isn't held twice.
 
 ## Privacy
 
-No network calls and no telemetry. The Haiku check runs only if you turn it on, on your own account.
+No network calls and no telemetry. The Haiku check runs only if you turn it on, and then on your own account.
 
 ## Development
 
@@ -144,8 +162,8 @@ claude plugin test .
 claude --plugin-dir .
 ```
 
-The hooks module is `hooks/register.tsx`; pure helpers (estimates, layout budget, topic check, the shared usage-limit flag) are in `hooks/lib.ts`, with tests beside them.
+The hooks module is `hooks/register.tsx`. Pure helpers (estimates, layout budget, topic check, the shared usage-limit flag) are in `hooks/lib.ts`, with tests beside them. See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## License
 
-MIT
+[MIT](LICENSE)

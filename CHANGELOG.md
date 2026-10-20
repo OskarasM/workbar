@@ -13,6 +13,8 @@ A bar that keeps up, honest time left again, and one usage limit for every chat.
 - Fix: the activity marker is named after the session, so a reload of the mod no longer leaves a file stuck on "busy" (which kept PowerSwitch-style sleep scripts waiting), and a session writes "idle" when it ends.
 - `/clear` now resets all of workbar's per-chat state.
 - Removed: the files-changed row and its tracking. Claude Code already shows each edit, and it saves a file check on every edit.
+- Fix: the full-detail pane opens with `/workbar` (was `/tasks`). Claude Code ships its own `/tasks`, so workbar's never registered and the pane had no command.
+- README rewritten: what workbar does for you, at a glance, with the details further down.
 
 ## 0.4.0 (2026-10-16)
 

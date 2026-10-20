@@ -600,7 +600,7 @@ export const register: Register = (on, options) => {
     await step('/handoff', () =>
       $.command.register({ name: 'handoff', description: 'Write a handoff from this chat, start a fresh chat and put the handoff in the prompt box' }),
     )
-    await step('/tasks', () => $.command.register({ name: 'tasks', description: 'Workbar: the task plan, agents and session health' }))
+    await step('/workbar', () => $.command.register({ name: 'workbar', description: 'Workbar: the task plan, agents and session health' }))
     if (opts.activityDir) {
       await step('activity folder', async () => {
         hasActivityDir = await $.fs
@@ -648,7 +648,7 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'tasks' }, async $ => {
+  on('command.run', { command: 'workbar' }, async $ => {
     await $.ui.open({ id: TASKS_PANE, title: 'Workbar' })
     return { text: 'Opened.' }
   })
@@ -1587,7 +1587,7 @@ export const register: Register = (on, options) => {
               <Text color="claude">{hiddenRunning > 0 ? '● ' : '  '}</Text>
               <Text dimColor>
                 {shown.length > 0 ? `+${hidden} more` : `${plural(running.length, 'agent')} running`}
-                {hiddenRunning > 0 && shown.length > 0 ? ` (${hiddenRunning} running)` : ''} · /tasks shows all
+                {hiddenRunning > 0 && shown.length > 0 ? ` (${hiddenRunning} running)` : ''} · /workbar shows all
               </Text>
             </Text>
           ),
